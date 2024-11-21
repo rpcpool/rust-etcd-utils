@@ -1,0 +1,96 @@
+---
+name: Test worfklow
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# This is needed if we are using github enterprise.
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04]
+    runs-on: [self-hosted, "${{ matrix.os }}", baremetal]
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set cargo
+        uses: dtolnay/rust-toolchain@1.79.0
+
+      - name: Clear rust cache
+        run: |
+          cargo cache -r all
+
+      - name: Set build cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+              ~/.cargo/bin/
+              ~/.cargo/registry/index/
+              ~/.cargo/registry/cache/
+              ~/.cargo/git/db/
+              fumarole/${{ matrix.os }}
+          key: ${{ matrix.os }}_fumarole_${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}_fumarole
+
+      - name: Cargo fmt
+        if: startsWith(github.ref, 'refs/tags/') != true
+        run: cargo +nightly fmt --all -- --check
+
+      - name: Cargo clippy
+        if: startsWith(github.ref, 'refs/tags/') != true
+        run: cargo clippy --workspace --all-targets --tests
+
+      - name: Cargo deny check advisories
+        if: startsWith(github.ref, 'refs/tags/') != true
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check advisories
+
+      - name: Cargo check the entire project
+        if: startsWith(github.ref, 'refs/tags/') != true
+        run: cargo check --all-targets --tests --all-features
+
+      - name: Set PROTOC environment variable in order to build
+        run: echo "PROTOC=/usr/bin/protoc" >> $GITHUB_ENV
+
+  test:
+    needs: check
+    runs-on: ubuntu-22.04
+    services:
+      etcd:
+        image: quay.io/coreos/etcd:v3.5.6
+        ports:
+          - 2379:2379
+          - 2380:2380
+        options: >-
+          --name test-etcd
+          --data-dir /etcd-data
+          --advertise-client-urls http://127.0.0.1:2379
+          --listen-client-urls http://0.0.0.0:2379
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set cargo
+        uses: dtolnay/rust-toolchain@1.79.0
+
+      - name: Run tests
+        env:
+          ETCD_TEST_URL: http://127.0.0.1:2379
+        run: cargo test --test -- --nocapture

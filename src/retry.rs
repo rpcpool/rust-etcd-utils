@@ -50,6 +50,36 @@ pub async fn retry_etcd_get(
     .await
 }
 
+///
+/// Retry an etcd operation by captures a reusable args and a closure that compute the future to try.
+///
+/// The future must return an etcd result type where the error could be any etcd error.
+///
+/// The `retry_etcd` function retry only on "transient" error, meaning error that happen because of "outside" forces
+/// that cannot be prevented such as a network partition.
+///
+/// If the error is for example gRPC status "Not found", the function won't retry it.
+///
+/// Examples
+///
+/// ```
+/// use rust_etcd_utils::{retry::retry_etcd};
+/// use etcd_client::Client;
+///
+/// let etcd = Client::connect(["http://localhost:2379"], None).await.expect("failed to connect to etcd");
+///
+/// let result = retry_etcd(
+///     etcd.clone(),
+///     ("my_key",),
+///     move |etcd, (my_key,)| {
+///         async move {
+///             etcd.kv_client().get(my_key, None).await
+///         }
+///     }   
+/// ).await;
+///
+/// ```
+///
 pub async fn retry_etcd<A, T, F, Fut>(
     etcd: etcd_client::Client,
     reusable_args: A,

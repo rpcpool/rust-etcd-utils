@@ -4,7 +4,10 @@ use {
         retry::retry_etcd_legacy,
         Revision,
     },
-    crate::retry::{retry_etcd, retry_etcd_txn},
+    crate::{
+        retry::{retry_etcd, retry_etcd_txn},
+        watcher::WatchClientExt,
+    },
     core::fmt,
     etcd_client::{Compare, CompareOp, GetOptions, LockOptions, Txn, TxnOp, TxnResponse},
     futures::{future::join_all, FutureExt},
@@ -17,7 +20,7 @@ use {
     },
     thiserror::Error,
     tokio::{
-        sync::mpsc,
+        sync::{broadcast, mpsc},
         task::{JoinError, JoinHandle},
     },
     tonic::Code,
@@ -25,7 +28,7 @@ use {
 };
 
 enum DeleteQueueCommand {
-    Delete(Vec<u8>, mpsc::UnboundedSender<()>),
+    Delete(Vec<u8>),
 }
 
 #[derive(Clone)]
@@ -50,18 +53,31 @@ impl Future for LockManagerHandle {
     }
 }
 
+#[derive(Clone)]
 pub struct ManagedLockDeleteCallback {
-    delete_callback_rx: mpsc::UnboundedReceiver<()>,
+    watch_lock_delete: broadcast::Sender<Revision>,
 }
 
-impl Future for ManagedLockDeleteCallback {
-    type Output = ();
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.delete_callback_rx.poll_recv(cx) {
-            Poll::Ready(Some(_)) => Poll::Ready(()),
-            Poll::Ready(None) => Poll::Ready(()),
-            Poll::Pending => Poll::Pending,
+#[derive(Debug, thiserror::Error)]
+pub enum LockDeleteCallbackError {
+    NotifierDropped(String),
+}
+
+impl fmt::Display for LockDeleteCallbackError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LockDeleteCallbackError::NotifierDropped(e) => write!(f, "notifier dropped: {e}"),
         }
+    }
+}
+
+impl ManagedLockDeleteCallback {
+    pub async fn wait_for_revoke(&self) -> Result<Revision, LockDeleteCallbackError> {
+        self.watch_lock_delete
+            .subscribe()
+            .recv()
+            .await
+            .map_err(|e| LockDeleteCallbackError::NotifierDropped(e.to_string()))
     }
 }
 
@@ -154,7 +170,7 @@ pub fn spawn_lock_manager(
                 }
             };
             match cmd {
-                DeleteQueueCommand::Delete(lock_id, delete_callback) => {
+                DeleteQueueCommand::Delete(lock_id) => {
                     let kv_client = etcd2.kv_client();
                     let lock_id2 = lock_id.clone();
                     let result = retry_etcd_legacy(Fixed::from_millis(10), move || {
@@ -163,7 +179,6 @@ pub fn spawn_lock_manager(
                         async move { kv_client.delete(lock_id, None).await }
                     })
                     .await;
-                    let _ = delete_callback.send(());
                     match result {
                         Ok(_) => {
                             let lock_id = String::from_utf8(lock_id).expect("lock id is not utf8");
@@ -184,13 +199,9 @@ pub fn spawn_lock_manager(
         // Drain any remaining delete commands
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                DeleteQueueCommand::Delete(lock_id, delete_callback) => {
+                DeleteQueueCommand::Delete(lock_id) => {
                     let mut kv_client = etcd2.kv_client();
-                    let fut = async move {
-                        let result = kv_client.delete(lock_id, None).await;
-                        let _ = delete_callback.send(());
-                        result
-                    };
+                    let fut = async move { kv_client.delete(lock_id, None).await };
                     futures.push(fut);
                 }
             }
@@ -219,12 +230,12 @@ impl LockManager {
     where
         S: AsRef<str>,
     {
-        self.try_lock_with_delete_callback(name, lease_duration)
+        self.try_lock_with_revoke_callback(name, lease_duration)
             .await
             .map(|(lock, _)| lock)
     }
 
-    pub async fn try_lock_with_delete_callback<S>(
+    pub async fn try_lock_with_revoke_callback<S>(
         &self,
         name: S,
         lease_duration: Duration,
@@ -276,8 +287,10 @@ impl LockManager {
             }
         };
 
-        let (delete_callback_tx, delete_callback_rx) = mpsc::unbounded_channel();
-
+        let watch_lock_delete = self
+            .etcd
+            .watch_client()
+            .watch_key_delete(lock_key.clone(), revision);
         Ok((
             ManagedLock {
                 lock_key,
@@ -285,9 +298,9 @@ impl LockManager {
                 etcd: self.etcd.clone(),
                 created_at_revision: revision,
                 delete_signal_tx: self.delete_queue_tx.clone(),
-                delete_callback_tx,
+                revoke_callback_tx: watch_lock_delete.clone(),
             },
-            ManagedLockDeleteCallback { delete_callback_rx },
+            ManagedLockDeleteCallback { watch_lock_delete },
         ))
     }
 }
@@ -301,15 +314,14 @@ pub struct ManagedLock {
     pub created_at_revision: Revision,
     etcd: etcd_client::Client,
     delete_signal_tx: tokio::sync::mpsc::UnboundedSender<DeleteQueueCommand>,
-    delete_callback_tx: mpsc::UnboundedSender<()>,
+    revoke_callback_tx: broadcast::Sender<Revision>,
 }
 
 impl Drop for ManagedLock {
     fn drop(&mut self) {
-        let _ = self.delete_signal_tx.send(DeleteQueueCommand::Delete(
-            self.lock_key.clone(),
-            self.delete_callback_tx.clone(),
-        ));
+        let _ = self
+            .delete_signal_tx
+            .send(DeleteQueueCommand::Delete(self.lock_key.clone()));
     }
 }
 
@@ -355,22 +367,81 @@ impl ManagedLock {
         get_response.count() == 1
     }
 
+    pub fn get_key(&self) -> Vec<u8> {
+        self.lock_key.clone()
+    }
+
     ///
-    /// This function make sure the future is executed within a managed lock.
-    /// If the lock is revoked, it will return an error.
-    /// If the lock is orphaned, it will return an error.
+    /// This function make sure the future is executed within a valid managed lock lifetime.
     ///
-    /// A lock become orphan if the lock manager is stopped.
-    pub async fn scope<T, F, Fut>(&self, f: F) -> Result<T, LockError>
+    /// If the lock is revoked, it will cancel the future and return a LockError::LockRevoked.
+    ///
+    /// Make sure the future returned by the closure is cancel safe.
+    ///
+    /// Examples
+    ///
+    /// ```
+    /// use etcd_client::Client;
+    /// use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, ManagedLock};
+    ///
+    /// let etcd = Client::connect(["http://localhost:2379"], None).await.expect("failed to connect to etcd");
+    ///
+    /// let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    ///
+    /// let (lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory.clone());
+    ///
+    /// // Do something with the lock manager
+    ///
+    /// let managed_lock: ManagedLock = lock_man.try_lock("test").await.expect("failed to lock");
+    ///
+    /// managed_lock.scope(async move {
+    ///    // execute only if my lock is valid
+    ///    access_protected_ressource().await;
+    /// });
+    ///
+    /// ```
+    pub async fn scope<T, Fut>(&self, fut: Fut) -> Result<T, LockError>
+    where
+        T: Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        self.scope_with(move || fut).await
+    }
+
+    ///
+    /// Similar to [`ManagedLock::scope`] but accept a closure to compute the future to execute against the lock.
+    ///
+    pub async fn scope_with<T, F, Fut>(&self, func: F) -> Result<T, LockError>
     where
         T: Send + 'static,
         F: FnOnce() -> Fut,
         Fut: Future<Output = T> + Send + 'static,
     {
-        if !self.is_alive().await {
-            return Err(LockError::LockRevoked);
+        let mut rx = self.revoke_callback_tx.subscribe();
+
+        match rx.try_recv() {
+            Ok(_) => {
+                return Err(LockError::LockRevoked);
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                panic!("revoke callback channel is closed");
+            }
+            _ => {}
         }
-        Ok(f().await)
+        tokio::select! {
+            result = func() => {
+                Ok(result)
+            }
+            result = rx.recv() => {
+                match result {
+                    Err(e) => panic!("failed to receive revoke callback: {e}"),
+                    Ok(_rev) => {
+                        Err(LockError::LockRevoked)
+                    }
+                }
+
+            }
+        }
     }
 }
 

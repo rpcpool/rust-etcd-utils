@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use common::random_str;
 use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, lock::TryLockError};
-
 mod common;
 
 #[tokio::test]
@@ -46,12 +45,15 @@ async fn dropping_managed_lock_should_revoke_etcd_lock() {
     let lock_name = random_str(10);
 
     let (managed_lock1, delete_cb) = lock_man
-        .try_lock_with_delete_callback(lock_name.as_str(), Duration::from_secs(10))
+        .try_lock_with_revoke_callback(lock_name.as_str(), Duration::from_secs(10))
         .await
         .expect("failed to lock");
 
     drop(managed_lock1);
-    let _ = delete_cb.await;
+    let _ = delete_cb
+        .wait_for_revoke()
+        .await
+        .expect("failed to be notified of revoked lock");
 
     let _managed_lock2 = lock_man
         .try_lock(lock_name, Duration::from_secs(10))
@@ -75,4 +77,41 @@ async fn lock_lease_should_be_automatically_refreshed() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     assert!(managed_lock1.is_alive().await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_managed_lock_scope() {
+    let etcd = common::get_etcd_client().await;
+    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+
+    let lock_name = random_str(10);
+
+    let managed_lock1 = lock_man
+        .try_lock(lock_name, Duration::from_secs(10))
+        .await
+        .expect("failed to lock");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let lock_key = managed_lock1.get_key();
+
+    let h = tokio::spawn(async move {
+        managed_lock1
+            .scope(async move {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                // This should never be reached
+                tx.send(()).unwrap();
+            })
+            .await
+    });
+
+    etcd.kv_client()
+        .delete(lock_key, None)
+        .await
+        .expect("failed to delete key");
+
+    let _ = h.await;
+    let result = rx.await;
+    // If the callback rx received a msg it means the scope didn't cancel the future as it should.
+    assert!(result.is_err());
 }

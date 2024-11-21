@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use common::random_str;
-use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, lock::TryLockError};
+use rust_etcd_utils::{
+    lease::ManagedLeaseFactory,
+    lock::{spawn_lock_manager, TryLockError},
+};
 mod common;
 
 #[tokio::test]
@@ -114,4 +117,30 @@ async fn test_managed_lock_scope() {
     let result = rx.await;
     // If the callback rx received a msg it means the scope didn't cancel the future as it should.
     assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lock() {
+    let etcd = common::get_etcd_client().await;
+    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+    let lock_name = random_str(10);
+
+    let lock = lock_man
+        .lock(&lock_name, Duration::from_secs(2))
+        .await
+        .expect("failed to lock 1")
+        .expect("etcd conn failed");
+
+    let _ = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        println!("will revoke lock");
+        drop(lock)
+    });
+
+    lock_man
+        .lock(lock_name, Duration::from_secs(2))
+        .await
+        .expect("failed to lock 2")
+        .expect("etcd conn failed");
 }

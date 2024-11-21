@@ -1,5 +1,7 @@
 pub async fn get_etcd_client() -> etcd_client::Client {
-    etcd_client::Client::connect(["http://localhost:2379"], None)
+
+    let url = option_env!("ETCD_TEST_URL").unwrap_or("http://localhost:2379");
+    etcd_client::Client::connect([url], None)
         .await
         .expect("failed to connect to etcd")
 }

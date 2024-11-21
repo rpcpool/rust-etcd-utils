@@ -54,7 +54,7 @@ impl Future for LockManagerHandle {
 }
 
 #[derive(Clone)]
-pub struct ManagedLockDeleteCallback {
+pub struct ManagedLockRevokeNotify {
     watch_lock_delete: broadcast::Sender<Revision>,
 }
 
@@ -71,8 +71,8 @@ impl fmt::Display for LockDeleteCallbackError {
     }
 }
 
-impl ManagedLockDeleteCallback {
-    pub async fn wait_for_revoke(&self) -> Result<Revision, LockDeleteCallbackError> {
+impl ManagedLockRevokeNotify {
+    pub async fn wait_for_revoke(self) -> Result<Revision, LockDeleteCallbackError> {
         self.watch_lock_delete
             .subscribe()
             .recv()
@@ -230,16 +230,16 @@ impl LockManager {
     where
         S: AsRef<str>,
     {
-        self.try_lock_with_revoke_callback(name, lease_duration)
+        self.try_lock_return_revoke_notify(name, lease_duration)
             .await
             .map(|(lock, _)| lock)
     }
 
-    pub async fn try_lock_with_revoke_callback<S>(
+    pub async fn try_lock_return_revoke_notify<S>(
         &self,
         name: S,
         lease_duration: Duration,
-    ) -> Result<(ManagedLock, ManagedLockDeleteCallback), TryLockError>
+    ) -> Result<(ManagedLock, ManagedLockRevokeNotify), TryLockError>
     where
         S: AsRef<str>,
     {
@@ -300,7 +300,7 @@ impl LockManager {
                 delete_signal_tx: self.delete_queue_tx.clone(),
                 revoke_callback_tx: watch_lock_delete.clone(),
             },
-            ManagedLockDeleteCallback { watch_lock_delete },
+            ManagedLockRevokeNotify { watch_lock_delete },
         ))
     }
 }

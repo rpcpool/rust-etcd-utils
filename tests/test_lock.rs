@@ -45,7 +45,7 @@ async fn dropping_managed_lock_should_revoke_etcd_lock() {
     let lock_name = random_str(10);
 
     let (managed_lock1, delete_cb) = lock_man
-        .try_lock_with_revoke_callback(lock_name.as_str(), Duration::from_secs(10))
+        .try_lock_return_revoke_notify(lock_name.as_str(), Duration::from_secs(10))
         .await
         .expect("failed to lock");
 

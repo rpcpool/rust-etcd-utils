@@ -11,3 +11,9 @@ Utility library for common ETCD management in Rust, it covers:
 ## How to test
 
 Uses `compose.yaml` to launch and instance of `etcd` with port-fowarding over the port 2379, so `localhost:2379` redirects to `etcd` instance inside docker.
+
+Then run the following command
+
+```sh
+$ cargo test --test -- --nocapture
+```

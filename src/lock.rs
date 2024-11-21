@@ -52,10 +52,16 @@ impl Future for LockManagerHandle {
         self.inner.poll_unpin(cx)
     }
 }
-
-#[derive(Clone)]
 pub struct ManagedLockRevokeNotify {
-    watch_lock_delete: broadcast::Sender<Revision>,
+    watch_lock_delete: broadcast::Receiver<Revision>,
+}
+
+impl Clone for ManagedLockRevokeNotify {
+    fn clone(&self) -> Self {
+        Self {
+            watch_lock_delete: self.watch_lock_delete.resubscribe(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,12 +78,8 @@ impl fmt::Display for LockDeleteCallbackError {
 }
 
 impl ManagedLockRevokeNotify {
-    pub async fn wait_for_revoke(self) -> Result<Revision, LockDeleteCallbackError> {
-        self.watch_lock_delete
-            .subscribe()
-            .recv()
-            .await
-            .map_err(|e| LockDeleteCallbackError::NotifierDropped(e.to_string()))
+    pub async fn wait_for_revoke(mut self) {
+        let _ = self.watch_lock_delete.recv().await;
     }
 }
 
@@ -313,9 +315,11 @@ impl LockManager {
                 etcd: self.etcd.clone(),
                 created_at_revision: revision,
                 delete_signal_tx: self.delete_queue_tx.clone(),
-                revoke_callback_tx: watch_lock_delete.clone(),
+                revoke_callback_rx: watch_lock_delete.subscribe(),
             },
-            ManagedLockRevokeNotify { watch_lock_delete },
+            ManagedLockRevokeNotify {
+                watch_lock_delete: watch_lock_delete.subscribe(),
+            },
         ))
     }
 
@@ -395,7 +399,7 @@ impl LockManager {
             etcd: self.etcd.clone(),
             created_at_revision: revision,
             delete_signal_tx: self.delete_queue_tx.clone(),
-            revoke_callback_tx: watch_lock_delete.clone(),
+            revoke_callback_rx: watch_lock_delete.subscribe(),
         };
 
         Ok(Some(managed_lock))
@@ -411,7 +415,7 @@ pub struct ManagedLock {
     pub created_at_revision: Revision,
     etcd: etcd_client::Client,
     delete_signal_tx: tokio::sync::mpsc::UnboundedSender<DeleteQueueCommand>,
-    revoke_callback_tx: broadcast::Sender<Revision>,
+    revoke_callback_rx: broadcast::Receiver<Revision>,
 }
 
 impl Drop for ManagedLock {
@@ -456,7 +460,7 @@ impl ManagedLock {
 
     pub fn get_revoke_notify(&self) -> ManagedLockRevokeNotify {
         ManagedLockRevokeNotify {
-            watch_lock_delete: self.revoke_callback_tx.clone(),
+            watch_lock_delete: self.revoke_callback_rx.resubscribe(),
         }
     }
 
@@ -520,7 +524,7 @@ impl ManagedLock {
         F: FnOnce() -> Fut,
         Fut: Future<Output = T> + Send + 'static,
     {
-        let mut rx = self.revoke_callback_tx.subscribe();
+        let mut rx = self.revoke_callback_rx.resubscribe();
 
         match rx.try_recv() {
             Ok(_) => {

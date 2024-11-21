@@ -5,18 +5,22 @@ use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, lock
 
 mod common;
 
-
 #[tokio::test]
 async fn test_locking() {
     let etcd = common::get_etcd_client().await;
     let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-    let (lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory.clone());
+    let (lock_man_handle, lock_man) =
+        spawn_lock_manager(etcd.clone(), managed_lease_factory.clone());
     let lock_name = random_str(10);
-    lock_man.try_lock(lock_name, Duration::from_secs(10)).await.expect("failed to lock");
+    lock_man
+        .try_lock(lock_name, Duration::from_secs(10))
+        .await
+        .expect("failed to lock");
     drop(lock_man);
-    lock_man_handle.await.expect("failed to release lock manager handle");
+    lock_man_handle
+        .await
+        .expect("failed to release lock manager handle");
 }
-
 
 #[tokio::test]
 async fn it_should_failed_to_lock_already_taken_lock() {
@@ -25,7 +29,10 @@ async fn it_should_failed_to_lock_already_taken_lock() {
     let (_lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
 
     let lock_name = random_str(10);
-    let _managed_lock1 = lock_man.try_lock(lock_name.as_str(), Duration::from_secs(10)).await.expect("failed to lock");
+    let _managed_lock1 = lock_man
+        .try_lock(lock_name.as_str(), Duration::from_secs(10))
+        .await
+        .expect("failed to lock");
     let result = lock_man.try_lock(lock_name, Duration::from_secs(10)).await;
 
     assert!(matches!(result, Err(TryLockError::AlreadyTaken)));
@@ -46,9 +53,11 @@ async fn dropping_managed_lock_should_revoke_etcd_lock() {
     drop(managed_lock1);
     let _ = delete_cb.await;
 
-    let _managed_lock2 = lock_man.try_lock(lock_name, Duration::from_secs(10)).await.expect("failed to re-acquire revoked lock");
+    let _managed_lock2 = lock_man
+        .try_lock(lock_name, Duration::from_secs(10))
+        .await
+        .expect("failed to re-acquire revoked lock");
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lock_lease_should_be_automatically_refreshed() {

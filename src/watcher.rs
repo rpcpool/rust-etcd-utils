@@ -1,9 +1,10 @@
 use {
     super::{retry::retry_etcd_legacy, Revision},
+    crate::retry::is_transient,
     etcd_client::{EventType, WatchClient, WatchFilterType, WatchOptions},
     retry::delay::Exponential,
     serde::de::DeserializeOwned,
-    tokio::sync::mpsc,
+    tokio::sync::{broadcast, mpsc},
     tokio_stream::StreamExt,
     tracing::{error, warn},
 };
@@ -183,6 +184,70 @@ pub trait WatchClientExt {
             }
         });
         rx
+    }
+
+    fn watch_key_delete(
+        &self,
+        key: impl Into<Vec<u8>>,
+        revision: Revision,
+    ) -> broadcast::Sender<Revision> {
+        let wc = self.get_watch_client();
+        let key = key.into();
+
+        let (tx, _) = broadcast::channel(1);
+
+        let tx2 = tx.clone();
+        tokio::spawn(async move {
+            let wopts = WatchOptions::new()
+                .with_start_revision(revision)
+                .with_filters(vec![WatchFilterType::NoPut]);
+            let tx = tx2;
+            'outer: loop {
+                let key2 = key.clone();
+                let retry_strategy = Exponential::from_millis_with_factor(10, 10.0).take(3);
+                let wc2 = wc.clone();
+                let wopts2 = wopts.clone();
+                let (mut watcher, mut stream) = retry_etcd_legacy(retry_strategy, move || {
+                    let mut wc = wc2.clone();
+                    let key = key2.clone();
+                    let wopts = wopts2.clone();
+                    async move { wc.watch(key.clone(), Some(wopts)).await }
+                })
+                .await
+                .expect("watch retry failed");
+
+                match stream.next().await {
+                    Some(Ok(watch_resp)) => {
+                        if watch_resp.canceled() {
+                            // This is probably because the compaction_revision < initial revision
+                            error!("watch cancelled: {watch_resp:?}");
+                            break;
+                        }
+
+                        for event in watch_resp.events() {
+                            if let EventType::Delete = event.event_type() {
+                                let kv = event.kv().expect("delete event with no kv");
+                                let revision = kv.mod_revision();
+                                let _ = tx.send(revision);
+                                let _ = watcher.cancel().await;
+                                break 'outer;
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        if !is_transient(&e) {
+                            tracing::error!("watch stream error: {e}");
+                            break;
+                        }
+                    }
+                    None => {
+                        tracing::warn!("watch stream closed");
+                    }
+                }
+                let _ = watcher.cancel().await;
+            }
+        });
+        tx
     }
 }
 

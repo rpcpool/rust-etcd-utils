@@ -112,5 +112,6 @@ async fn test_managed_lock_scope() {
 
     let _ = h.await;
     let result = rx.await;
-    assert!(matches!(result, Err(_)));
+    // If the callback rx received a msg it means the scope didn't cancel the future as it should.
+    assert!(result.is_err());
 }

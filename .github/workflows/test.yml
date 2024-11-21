@@ -74,15 +74,12 @@ jobs:
     runs-on: ubuntu-22.04
     services:
       etcd:
-        image: quay.io/coreos/etcd:v3.5.6
+        image: bitnami/etcd:3.5
         ports:
           - 2379:2379
           - 2380:2380
-        options: >-
-          --name test-etcd
-          --data-dir /etcd-data
-          --advertise-client-urls http://127.0.0.1:2379
-          --listen-client-urls http://0.0.0.0:2379
+        env:
+          ALLOW_NONE_AUTHENTICATION: 'yes'
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -91,6 +88,4 @@ jobs:
         uses: dtolnay/rust-toolchain@1.79.0
 
       - name: Run tests
-        env:
-          ETCD_TEST_URL: http://127.0.0.1:2379
         run: cargo test --test -- --nocapture

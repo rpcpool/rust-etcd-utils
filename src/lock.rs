@@ -52,10 +52,16 @@ impl Future for LockManagerHandle {
         self.inner.poll_unpin(cx)
     }
 }
-
-#[derive(Clone)]
 pub struct ManagedLockRevokeNotify {
-    watch_lock_delete: broadcast::Sender<Revision>,
+    watch_lock_delete: broadcast::Receiver<Revision>,
+}
+
+impl Clone for ManagedLockRevokeNotify {
+    fn clone(&self) -> Self {
+        Self {
+            watch_lock_delete: self.watch_lock_delete.resubscribe(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,12 +78,8 @@ impl fmt::Display for LockDeleteCallbackError {
 }
 
 impl ManagedLockRevokeNotify {
-    pub async fn wait_for_revoke(self) -> Result<Revision, LockDeleteCallbackError> {
-        self.watch_lock_delete
-            .subscribe()
-            .recv()
-            .await
-            .map_err(|e| LockDeleteCallbackError::NotifierDropped(e.to_string()))
+    pub async fn wait_for_revoke(mut self) {
+        let _ = self.watch_lock_delete.recv().await;
     }
 }
 
@@ -221,6 +223,21 @@ pub fn spawn_lock_manager(
     )
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum LockingError {
+    InvalidLockName,
+}
+
+impl fmt::Display for LockingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LockingError::InvalidLockName => {
+                f.write_str("invalid lock name -- too many prefix overlapping")
+            }
+        }
+    }
+}
+
 impl LockManager {
     pub async fn try_lock<S>(
         &self,
@@ -298,10 +315,94 @@ impl LockManager {
                 etcd: self.etcd.clone(),
                 created_at_revision: revision,
                 delete_signal_tx: self.delete_queue_tx.clone(),
-                revoke_callback_tx: watch_lock_delete.clone(),
+                revoke_callback_rx: watch_lock_delete.subscribe(),
             },
-            ManagedLockRevokeNotify { watch_lock_delete },
+            ManagedLockRevokeNotify {
+                watch_lock_delete: watch_lock_delete.subscribe(),
+            },
         ))
+    }
+
+    ///
+    /// Locks a key with automatic lease refresh and lock revocation when dropped.
+    /// If the key is already held by another lock, it will wait until the lock is released.
+    ///
+    /// Be aware this method can await indefinitely if the key is never released.
+    pub async fn lock<S>(
+        &self,
+        name: S,
+        lease_duration: Duration,
+    ) -> Result<Option<ManagedLock>, LockingError>
+    where
+        S: AsRef<str>,
+    {
+        let name = name.as_ref();
+        if self.delete_queue_tx.is_closed() {
+            panic!("LockManager lifecycle thread is stopped.");
+        }
+        let gopts = GetOptions::new().with_prefix();
+        trace!("Trying to lock {name}...");
+        let result = retry_etcd(
+            self.etcd.clone(),
+            (name.to_string(), gopts),
+            move |etcd, (name, gopts)| async move { etcd.kv_client().get(name, Some(gopts)).await },
+        )
+        .await;
+
+        let get_response = match result {
+            Ok(get_response) => get_response,
+            Err(e) => {
+                tracing::error!("failed to communicate with etcd: {e}");
+                return Ok(None);
+            }
+        };
+
+        if get_response.count() > 1 {
+            return Err(LockingError::InvalidLockName);
+        }
+
+        let managed_lease = self
+            .manager_lease_factory
+            .new_lease(lease_duration, None)
+            .await;
+        let lease_id = managed_lease.lease_id;
+
+        let result = retry_etcd(
+            self.etcd.clone(),
+            (name.to_string(), LockOptions::new().with_lease(lease_id)),
+            |mut etcd, (name, opts)| async move { etcd.lock(name, Some(opts)).await },
+        )
+        .await;
+
+        let lock_response = if let Ok(lock_response) = result {
+            lock_response
+        } else {
+            return Ok(None);
+        };
+
+        let (revision, lock_key) = (
+            lock_response
+                .header()
+                .expect("empty header for etcd lock")
+                .revision(),
+            lock_response.key().to_vec(),
+        );
+
+        let watch_lock_delete = self
+            .etcd
+            .watch_client()
+            .watch_key_delete(lock_key.clone(), revision);
+
+        let managed_lock = ManagedLock {
+            lock_key,
+            managed_lease,
+            etcd: self.etcd.clone(),
+            created_at_revision: revision,
+            delete_signal_tx: self.delete_queue_tx.clone(),
+            revoke_callback_rx: watch_lock_delete.subscribe(),
+        };
+
+        Ok(Some(managed_lock))
     }
 }
 
@@ -314,7 +415,7 @@ pub struct ManagedLock {
     pub created_at_revision: Revision,
     etcd: etcd_client::Client,
     delete_signal_tx: tokio::sync::mpsc::UnboundedSender<DeleteQueueCommand>,
-    revoke_callback_tx: broadcast::Sender<Revision>,
+    revoke_callback_rx: broadcast::Receiver<Revision>,
 }
 
 impl Drop for ManagedLock {
@@ -355,6 +456,12 @@ impl ManagedLock {
         retry_etcd_txn(self.etcd.clone(), txn)
             .await
             .expect("failed txn")
+    }
+
+    pub fn get_revoke_notify(&self) -> ManagedLockRevokeNotify {
+        ManagedLockRevokeNotify {
+            watch_lock_delete: self.revoke_callback_rx.resubscribe(),
+        }
     }
 
     pub async fn is_alive(&self) -> bool {
@@ -417,7 +524,7 @@ impl ManagedLock {
         F: FnOnce() -> Fut,
         Fut: Future<Output = T> + Send + 'static,
     {
-        let mut rx = self.revoke_callback_tx.subscribe();
+        let mut rx = self.revoke_callback_rx.resubscribe();
 
         match rx.try_recv() {
             Ok(_) => {

@@ -346,7 +346,8 @@ impl LockManager {
         let managed_lease = self
             .manager_lease_factory
             .new_lease(lease_duration, None)
-            .await;
+            .await
+            .map_err(TryLockError::EtcdError)?;
         let lease_id = managed_lease.lease_id;
 
         let lock_fut = retry_etcd(
@@ -399,7 +400,7 @@ impl LockManager {
         let managed_lease = self
             .manager_lease_factory
             .new_lease(lease_duration, None)
-            .await;
+            .await?;
         let lease_id = managed_lease.lease_id;
 
         let lock_response = retry_etcd(

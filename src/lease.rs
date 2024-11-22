@@ -13,6 +13,11 @@ use {
 // Jiffy is interval between system timer interrupts, typically 10ms for linux systems.
 const AT_LEAST_10_JIFFIES: Duration = Duration::from_millis(100);
 
+///
+/// Managed lease instance that will keep the lease alive until it is dropped.
+///
+/// See [`ManagedLeaseFactory::new_lease`] for more information.
+///
 pub struct ManagedLease {
     pub lease_id: i64,
     // Let this field dead, because when drop it will trigger a task to wake up and gracefully revoke lease.
@@ -20,6 +25,9 @@ pub struct ManagedLease {
     _tx_terminate: oneshot::Sender<()>,
 }
 
+///
+/// Managed lease factory that will create a new lease and keep it alive until it is dropped.
+///
 #[derive(Clone)]
 pub struct ManagedLeaseFactory {
     etcd: etcd_client::Client,
@@ -34,11 +42,25 @@ impl ManagedLeaseFactory {
         }
     }
 
+    ///
+    /// Shutdown the lease factory and revoke all leases.
+    ///
+    /// Becareful calling this method as it will wait for all lease to be revoked.
+    ///
     pub async fn shutdown(self, timeout: Duration) {
         let mut lock = self.js.lock().await;
         let _ = tokio::time::timeout(timeout, lock.shutdown()).await;
     }
 
+    ///
+    /// Create a new managed lease with the given time-to-live (TTL) and keepalive interval.
+    ///
+    /// Managed lease have automatic keep alive mechanism that will keep the lease alive until it is dropped.
+    ///
+    /// The ttl must be at least two (2) seconds.
+    ///
+    /// Keepalive interval is optional, if not provided it will be half of the ttl.
+    ///
     pub async fn new_lease(
         &self,
         ttl: Duration,

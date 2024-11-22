@@ -306,8 +306,8 @@ pub fn spawn_lock_manager(
 ///
 #[derive(Debug, thiserror::Error)]
 pub enum LockingError {
-    #[error("Invalid lock name, too many prefix overlapping")]
-    InvalidLockName,
+    #[error("Etcd error: {0:?}")]
+    EtcdError(etcd_client::Error),
 }
 
 impl LockManager {
@@ -337,19 +337,17 @@ impl LockManager {
             move |etcd, (name, gopts)| async move { etcd.kv_client().get(name, Some(gopts)).await },
         )
         .await
-        .expect("failed to communicate with etcd");
+        .map_err(TryLockError::EtcdError)?;
 
-        if get_response.count() > 1 {
-            return Err(TryLockError::InvalidLockName);
-        }
-        if get_response.count() == 1 {
+        if get_response.count() > 0 {
             return Err(TryLockError::AlreadyTaken);
         }
 
         let managed_lease = self
             .manager_lease_factory
             .new_lease(lease_duration, None)
-            .await;
+            .await
+            .map_err(TryLockError::EtcdError)?;
         let lease_id = managed_lease.lease_id;
 
         let lock_fut = retry_etcd(
@@ -391,53 +389,26 @@ impl LockManager {
         &self,
         name: S,
         lease_duration: Duration,
-    ) -> Result<Option<ManagedLock>, LockingError>
+    ) -> Result<ManagedLock, etcd_client::Error>
     where
         S: AsRef<str>,
     {
-        let name = name.as_ref();
         if self.delete_queue_tx.is_closed() {
             panic!("LockManager lifecycle thread is stopped.");
         }
-        let gopts = GetOptions::new().with_prefix();
-        trace!("Trying to lock {name}...");
-        let result = retry_etcd(
-            self.etcd.clone(),
-            (name.to_string(), gopts),
-            move |etcd, (name, gopts)| async move { etcd.kv_client().get(name, Some(gopts)).await },
-        )
-        .await;
-
-        let get_response = match result {
-            Ok(get_response) => get_response,
-            Err(e) => {
-                tracing::error!("failed to communicate with etcd: {e}");
-                return Ok(None);
-            }
-        };
-
-        if get_response.count() > 1 {
-            return Err(LockingError::InvalidLockName);
-        }
-
+        let name = name.as_ref();
         let managed_lease = self
             .manager_lease_factory
             .new_lease(lease_duration, None)
-            .await;
+            .await?;
         let lease_id = managed_lease.lease_id;
 
-        let result = retry_etcd(
+        let lock_response = retry_etcd(
             self.etcd.clone(),
             (name.to_string(), LockOptions::new().with_lease(lease_id)),
             |mut etcd, (name, opts)| async move { etcd.lock(name, Some(opts)).await },
         )
-        .await;
-
-        let lock_response = if let Ok(lock_response) = result {
-            lock_response
-        } else {
-            return Ok(None);
-        };
+        .await?;
 
         let (revision, lock_key) = (
             lock_response
@@ -461,7 +432,7 @@ impl LockManager {
             revoke_callback_rx: watch_lock_delete.subscribe(),
         };
 
-        Ok(Some(managed_lock))
+        Ok(managed_lock)
     }
 }
 
@@ -629,12 +600,12 @@ impl ManagedLock {
 ///
 /// Error that can occur when trying to lock a key.
 ///
-#[derive(Debug, PartialEq, Eq, Error)]
+#[derive(Debug, Error)]
 pub enum TryLockError {
-    #[error("Invalid lock name, too many prefix overlapping")]
-    InvalidLockName,
     #[error("Already taken")]
     AlreadyTaken,
     #[error("Locking deadline exceeded")]
     LockingDeadlineExceeded,
+    #[error("Etcd error: {0:?}")]
+    EtcdError(etcd_client::Error),
 }

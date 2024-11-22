@@ -65,14 +65,13 @@ impl ManagedLeaseFactory {
         &self,
         ttl: Duration,
         keepalive_interval: Option<Duration>,
-    ) -> ManagedLease {
+    ) -> Result<ManagedLease, etcd_client::Error> {
         let ttl_secs: i64 = ttl.as_secs() as i64;
         assert!(ttl_secs >= 2, "lease ttl must be at least two (2) seconds");
         let lease_id = retry_etcd(self.etcd.clone(), (), move |mut etcd, _| async move {
             etcd.lease_grant(ttl_secs, None).await
         })
-        .await
-        .expect("failed to grant lease")
+        .await?
         .id();
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let client = self.etcd.clone();
@@ -154,9 +153,9 @@ impl ManagedLeaseFactory {
             }
         });
 
-        ManagedLease {
+        Ok(ManagedLease {
             lease_id,
             _tx_terminate: stop_tx,
-        }
+        })
     }
 }

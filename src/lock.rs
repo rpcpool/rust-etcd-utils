@@ -369,7 +369,7 @@ impl LockManager {
         let watch_lock_delete = self
             .etcd
             .watch_client()
-            .watch_key_delete(lock_key.clone(), revision);
+            .watch_lock_key_change(lock_key.clone(), revision);
         Ok(ManagedLock {
             lock_key,
             managed_lease,
@@ -421,7 +421,7 @@ impl LockManager {
         let watch_lock_delete = self
             .etcd
             .watch_client()
-            .watch_key_delete(lock_key.clone(), revision);
+            .watch_lock_key_change(lock_key.clone(), revision);
 
         let managed_lock = ManagedLock {
             lock_key,

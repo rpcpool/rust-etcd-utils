@@ -18,7 +18,24 @@ pub fn is_transient(err: &etcd_client::Error) -> bool {
         etcd_client::Error::GRpcStatus(status) => match status.code() {
             tonic::Code::Ok => false,
             tonic::Code::Cancelled => false,
-            tonic::Code::Unknown => status.source().is_none(),
+            tonic::Code::Unknown => {
+                match status.source() {
+                    Some(e) => {
+                        match e.downcast_ref::<tonic::transport::Error>() {
+                            Some(_) => {
+                                // Because if the error is a transport error, it's likely a transient error due to connection reset.
+                                true
+                            }
+                            None => {
+                                return false;
+                            }
+                        }
+                    }
+                    None => {
+                        return true;
+                    }
+                }
+            },
             tonic::Code::InvalidArgument => false,
             tonic::Code::DeadlineExceeded => true,
             tonic::Code::NotFound => false,

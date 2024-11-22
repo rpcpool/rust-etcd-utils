@@ -127,8 +127,7 @@ async fn test_lock() {
     let lock = lock_man
         .lock(&lock_name, Duration::from_secs(2))
         .await
-        .expect("failed to lock 1")
-        .expect("etcd conn failed");
+        .expect("failed to lock 1");
 
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(6)).await;
@@ -139,8 +138,7 @@ async fn test_lock() {
     lock_man
         .lock(lock_name, Duration::from_secs(2))
         .await
-        .expect("failed to lock 2")
-        .expect("etcd conn failed");
+        .expect("failed to lock 2");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

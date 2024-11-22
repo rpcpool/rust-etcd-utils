@@ -450,6 +450,7 @@ pub struct ManagedLock {
 
 impl Drop for ManagedLock {
     fn drop(&mut self) {
+        info!("Destructor called for ManagedLock({})", String::from_utf8_lossy(&self.lock_key));
         let _ = self
             .delete_signal_tx
             .send(DeleteQueueCommand::Delete(self.lock_key.clone()));

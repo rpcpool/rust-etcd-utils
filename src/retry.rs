@@ -4,6 +4,15 @@ use {
     tracing::{error, warn},
 };
 
+///
+/// Check if an etcd error is transient.
+///
+/// Transient error are error that are caused by "outside" forces that cannot be prevented such as a network partition.
+///
+/// If the error is for example gRPC status "Not found", the function will return false.
+///
+/// Transient errors are worth retrying -- See [`retry_etcd`] for an example.
+///
 pub fn is_transient(err: &etcd_client::Error) -> bool {
     match err {
         etcd_client::Error::GRpcStatus(status) => match status.code() {
@@ -29,6 +38,9 @@ pub fn is_transient(err: &etcd_client::Error) -> bool {
     }
 }
 
+///
+/// Retry an etcd transaction if the error is transient.
+///
 pub async fn retry_etcd_txn(
     etcd: etcd_client::Client,
     txn: etcd_client::Txn,
@@ -39,6 +51,9 @@ pub async fn retry_etcd_txn(
     .await
 }
 
+///
+/// Retry an etcd get if the error is transient.
+///
 pub async fn retry_etcd_get(
     etcd: etcd_client::Client,
     key: String,
@@ -95,6 +110,9 @@ where
     retry_etcd_with_strategy(etcd, reusable_args, retry_strategy, f).await
 }
 
+///
+/// Similar to [`retry_etcd`] but with a custom retry strategy.
+///
 pub async fn retry_etcd_with_strategy<A, T, F, Fut>(
     etcd: etcd_client::Client,
     reusable_args: A,

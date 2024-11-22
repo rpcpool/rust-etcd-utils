@@ -9,6 +9,11 @@ use {
     tracing::{error, warn},
 };
 
+///
+/// Custom types for watch events.
+///
+/// Unwrap the etcd watch event to a more user-friendly event.
+///
 pub enum WatchEvent<V> {
     Put {
         key: Vec<u8>,
@@ -22,6 +27,15 @@ pub enum WatchEvent<V> {
     },
 }
 
+///
+/// Extension trait for [`WatchClient`].
+///
+/// This trait provides utility methods for working with [`WatchClient`].
+///
+/// This extension trait provides rust channel of watch stream and more reliability in case of transient errors.
+///
+/// On transient errors, the watch stream will be retried and resume where you left off.
+///
 #[async_trait::async_trait]
 pub trait WatchClientExt {
     fn get_watch_client(&self) -> WatchClient;
@@ -186,6 +200,9 @@ pub trait WatchClientExt {
         rx
     }
 
+    ///
+    /// Creates a broadcast channel that watches for a key to deleted.
+    ///
     fn watch_key_delete(
         &self,
         key: impl Into<Vec<u8>>,

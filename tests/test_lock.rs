@@ -47,13 +47,14 @@ async fn dropping_managed_lock_should_revoke_etcd_lock() {
     let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
     let lock_name = random_str(10);
 
-    let (managed_lock1, delete_cb) = lock_man
-        .try_lock_return_revoke_notify(lock_name.as_str(), Duration::from_secs(10))
+    let managed_lock1 = lock_man
+        .try_lock(lock_name.as_str(), Duration::from_secs(10))
         .await
         .expect("failed to lock");
 
+    let revoke_notify = managed_lock1.get_revoke_notify();
     drop(managed_lock1);
-    let _ = delete_cb.wait_for_revoke().await;
+    let _ = revoke_notify.wait_for_revoke().await;
 
     let _managed_lock2 = lock_man
         .try_lock(lock_name, Duration::from_secs(10))

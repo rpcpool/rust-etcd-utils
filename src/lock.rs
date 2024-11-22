@@ -576,23 +576,13 @@ impl ManagedLock {
                 return Err(LockError::LockRevoked);
             }
             Err(broadcast::error::TryRecvError::Closed) => {
-                panic!("revoke callback channel is closed");
+                return Err(LockError::LockRevoked);
             }
             _ => {}
         }
         tokio::select! {
-            result = func() => {
-                Ok(result)
-            }
-            result = rx.recv() => {
-                match result {
-                    Err(e) => panic!("failed to receive revoke callback: {e}"),
-                    Ok(_rev) => {
-                        Err(LockError::LockRevoked)
-                    }
-                }
-
-            }
+            result = func() => Ok(result),
+            _ = rx.recv() => Err(LockError::LockRevoked),
         }
     }
 }

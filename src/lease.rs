@@ -94,15 +94,10 @@ impl ManagedLeaseFactory {
         })
         .await?
         .id();
+        let created_at  = Instant::now();
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let client = self.etcd.clone();
         let mut lock = self.js.lock().await;
-
-        while let Some(result) = lock.try_join_next() {
-            if let Err(e) = result {
-                error!("failed to join handle, got {e:?}");
-            }
-        }
 
         let _ = lock.spawn(async move {
             'outer: loop {
@@ -116,34 +111,35 @@ impl ManagedLeaseFactory {
                     })
                         .await
                         .expect("failed to keep alive lease");  // if we have an error this will break out the entire loop
-
+                
                 let keepalive_interval =
                     keepalive_interval.unwrap_or(Duration::from_secs((ttl_secs / 2) as u64));
+
+                let mut last_renewal = created_at;
+
                 'inner: loop {
-                    let next_renewal = Instant::now() + keepalive_interval - AT_LEAST_10_JIFFIES;
+                    let next_renewal = last_renewal + keepalive_interval - AT_LEAST_10_JIFFIES;
                     let t = Instant::now();
                     tokio::select! {
                         _ = tokio::time::sleep_until(next_renewal) => {
-                            let sent_keepalive_at = Instant::now();
-                            
-                            let since_last_keep_alive = t.elapsed();
+                            let since_last_keep_alive = last_renewal.elapsed();
                             tracing::trace!("my ttl_secs: {ttl_secs}, got {since_last_keep_alive:?}");
                             let t2 = Instant::now();
                             if let Err(e) = keeper.keep_alive().await {
                                 error!("failed to keep alive lease {lease_id:?}, got {e:?}");
                                 break 'inner;
                             }
+                            last_renewal = Instant::now();
                             let res = keep_alive_resp_stream.next().await;
                             let keep_alive_rtt = t2.elapsed();
                             tracing::trace!("my ttl_secs: {ttl_secs}, keep alive rtt: {keep_alive_rtt:?}");
                             match res {
                                 Some(Ok(keep_alive_resp)) => {
                                     if keep_alive_resp.ttl() == 0 {
-                                        error!("lease {lease_id:?} expired");
+                                        error!("lease {lease_id:?} expired, since_last_keek_alive: {since_last_keep_alive:?}");
                                         break 'outer;
                                     }
-                                    // next_renewal = Instant::now() + keepalive_interval;
-                                    tracing::trace!("keep alive lease {lease_id:?} at {sent_keepalive_at:?}");
+                                    tracing::trace!("keep alive lease {lease_id:?} at {since_last_keep_alive:?}");
                                 }
                                 Some(Err(e)) => {
                                     warn!("keep alive stream for lease {lease_id:?} errored: {e:?}");

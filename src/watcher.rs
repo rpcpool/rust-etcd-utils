@@ -266,7 +266,8 @@ pub trait WatchClientExt {
                                     }
 
                                     if kv.key() == key {
-                                        info!("watcher detected delete event on key {key:?} with revision {revision} >= {key_mod_revision}");
+                                        let key_label = String::from_utf8_lossy(&key);
+                                        info!("watcher detected delete event on key {key_label:?} with revision {revision} >= {key_mod_revision}");
                                         let _ = tx.send(revision);
                                         let _ = watcher.cancel().await;
                                         break 'outer;

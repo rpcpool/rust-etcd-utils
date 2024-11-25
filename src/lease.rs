@@ -36,9 +36,28 @@ pub struct ManagedLeaseFactory {
 
 impl ManagedLeaseFactory {
     pub fn new(etcd: etcd_client::Client) -> Self {
+
+        let js = Arc::new(Mutex::new(JoinSet::new()));
+        let js2 = Arc::clone(&js);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                {
+                    let mut lock = js2.lock().await;
+                    while let Some(result) = lock.try_join_next() {
+                        if let Err(e) = result {
+                            error!("detected managed lease thread failed with: {e:?}");
+                        }
+                    }
+                }
+            }
+        });
+
+
         Self {
             etcd,
-            js: Arc::new(Mutex::new(JoinSet::new())),
+            js: js,
         }
     }
 

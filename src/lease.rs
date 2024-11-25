@@ -123,6 +123,9 @@ impl ManagedLeaseFactory {
                     tokio::select! {
                         _ = tokio::time::sleep_until(next_renewal) => {
                             let since_last_keep_alive = last_renewal.elapsed();
+                            if since_last_keep_alive >= keepalive_interval {
+                                warn!("keep alive lease {lease_id:?} took too long: {since_last_keep_alive:?}");
+                            }
                             tracing::trace!("my ttl_secs: {ttl_secs}, got {since_last_keep_alive:?}");
                             let t2 = Instant::now();
                             if let Err(e) = keeper.keep_alive().await {

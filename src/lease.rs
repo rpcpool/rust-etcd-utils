@@ -121,7 +121,7 @@ impl ManagedLeaseFactory {
                     let next_renewal = last_renewal + keepalive_interval - AT_LEAST_10_JIFFIES;
                     let t = Instant::now();
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        _ = tokio::time::sleep_until(next_renewal) => {
                             let since_last_keep_alive = last_renewal.elapsed();
                             tracing::trace!("my ttl_secs: {ttl_secs}, got {since_last_keep_alive:?}");
                             let t2 = Instant::now();
@@ -138,6 +138,10 @@ impl ManagedLeaseFactory {
                                     if keep_alive_resp.ttl() == 0 {
                                         error!("lease {lease_id:?} expired, since_last_keek_alive: {since_last_keep_alive:?}");
                                         break 'outer;
+                                    }
+                                    let ttl = keep_alive_resp.ttl();
+                                    if ttl < ttl_secs {
+                                        warn!("lease {lease_id:?} ttl reduced to {ttl}, since_last_keep_alive: {since_last_keep_alive:?}");
                                     }
                                     tracing::trace!("keep alive lease {lease_id:?} at {since_last_keep_alive:?}");
                                 }

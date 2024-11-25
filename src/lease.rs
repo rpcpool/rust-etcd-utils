@@ -48,6 +48,8 @@ impl ManagedLeaseFactory {
                     while let Some(result) = lock.try_join_next() {
                         if let Err(e) = result {
                             error!("detected managed lease thread failed with: {e:?}");
+                        } else {
+                            tracing::info!("detected managed lease thread finished");
                         }
                     }
                 }
@@ -119,14 +121,21 @@ impl ManagedLeaseFactory {
                     keepalive_interval.unwrap_or(Duration::from_secs((ttl_secs / 2) as u64));
                 'inner: loop {
                     let next_renewal = Instant::now() + keepalive_interval - AT_LEAST_10_JIFFIES;
+                    let t = Instant::now();
                     tokio::select! {
                         _ = tokio::time::sleep_until(next_renewal) => {
                             let sent_keepalive_at = Instant::now();
+                            
+                            let since_last_keep_alive = t.elapsed();
+                            tracing::info!("my ttl_secs: {ttl_secs}, got {since_last_keep_alive:?}");
+                            let t2 = Instant::now();
                             if let Err(e) = keeper.keep_alive().await {
                                 error!("failed to keep alive lease {lease_id:?}, got {e:?}");
                                 break 'inner;
                             }
                             let res = keep_alive_resp_stream.next().await;
+                            let keep_alive_rtt = t2.elapsed();
+                            tracing::info!("my ttl_secs: {ttl_secs}, keep alive rtt: {keep_alive_rtt:?}");
                             match res {
                                 Some(Ok(_)) => {
                                     // next_renewal = Instant::now() + keepalive_interval;

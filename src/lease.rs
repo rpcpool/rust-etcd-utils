@@ -137,7 +137,11 @@ impl ManagedLeaseFactory {
                             let keep_alive_rtt = t2.elapsed();
                             tracing::trace!("my ttl_secs: {ttl_secs}, keep alive rtt: {keep_alive_rtt:?}");
                             match res {
-                                Some(Ok(_)) => {
+                                Some(Ok(keep_alive_resp)) => {
+                                    if keep_alive_resp.ttl() == 0 {
+                                        error!("lease {lease_id:?} expired");
+                                        break 'outer;
+                                    }
                                     // next_renewal = Instant::now() + keepalive_interval;
                                     tracing::trace!("keep alive lease {lease_id:?} at {sent_keepalive_at:?}");
                                 }
@@ -151,6 +155,21 @@ impl ManagedLeaseFactory {
                                 }
                             }
                         }
+                        // result = keep_alive_resp_stream.next() => {
+                        //     match result {
+                        //         Some(Ok(_)) => {
+                        //             tracing::warn!("unexpected keep alive response");
+                        //         }
+                        //         Some(Err(e)) => {
+                        //             warn!("keep alive stream for lease {lease_id:?} errored: {e:?}");
+                        //             break 'inner;
+                        //         }
+                        //         None => {
+                        //             warn!("keep alive stream for lease {lease_id:?} ended");
+                        //             break 'inner;
+                        //         }
+                        //     }
+                        // }
                         _ = &mut stop_rx => {
                             let since_last_keep_alive = t.elapsed();
                             tracing::info!("revoking lease {lease_id:?}, last keep alive: {since_last_keep_alive:?}");

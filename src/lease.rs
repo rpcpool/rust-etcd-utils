@@ -111,7 +111,7 @@ impl ManagedLeaseFactory {
                             match res {
                                 Some(Ok(_)) => {
                                     // next_renewal = Instant::now() + keepalive_interval;
-                                    trace!("keep alive lease {lease_id:?} at {sent_keepalive_at:?}");
+                                    tracing::info!("keep alive lease {lease_id:?} at {sent_keepalive_at:?}");
                                 }
                                 Some(Err(e)) => {
                                     warn!("keep alive stream for lease {lease_id:?} errored: {e:?}");

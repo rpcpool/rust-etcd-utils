@@ -94,13 +94,13 @@ impl ManagedLeaseFactory {
         })
         .await?
         .id();
-        let created_at  = Instant::now();
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let client = self.etcd.clone();
         let mut lock = self.js.lock().await;
 
         let _ = lock.spawn(async move {
             'outer: loop {
+                let first_keep_alive  = Instant::now();
                 let (mut keeper, mut keep_alive_resp_stream) = retry_etcd(
                     client.clone(),
                     (lease_id,),
@@ -112,34 +112,30 @@ impl ManagedLeaseFactory {
                         .await
                         .expect("failed to keep alive lease");  // if we have an error this will break out the entire loop
                 
+                let mut last_keep_alive = first_keep_alive;
                 let keepalive_interval =
                     keepalive_interval.unwrap_or(Duration::from_secs((ttl_secs / 2) as u64));
-
-                let mut last_renewal = created_at;
-
+                let adjusted_interval = keepalive_interval - AT_LEAST_10_JIFFIES;
+                let mut next_renewal = first_keep_alive + adjusted_interval;
                 'inner: loop {
-                    let next_renewal = last_renewal + keepalive_interval - AT_LEAST_10_JIFFIES;
-                    let t = Instant::now();
                     tokio::select! {
                         _ = tokio::time::sleep_until(next_renewal) => {
-                            let since_last_keep_alive = last_renewal.elapsed();
-                            if since_last_keep_alive >= keepalive_interval {
-                                warn!("keep alive lease {lease_id:?} took too long: {since_last_keep_alive:?}");
+                            let since_last_keep_alive = last_keep_alive.elapsed();
+                            if since_last_keep_alive > keepalive_interval {
+                                let dt = since_last_keep_alive - keepalive_interval;
+                                warn!("last keep alive was {dt:?} late");
                             }
-                            tracing::trace!("my ttl_secs: {ttl_secs}, got {since_last_keep_alive:?}");
-                            let t2 = Instant::now();
                             if let Err(e) = keeper.keep_alive().await {
                                 error!("failed to keep alive lease {lease_id:?}, got {e:?}");
                                 break 'inner;
                             }
-                            last_renewal = Instant::now();
+                            last_keep_alive = Instant::now();
+                            next_renewal += adjusted_interval;
                             let res = keep_alive_resp_stream.next().await;
-                            let keep_alive_rtt = t2.elapsed();
-                            tracing::trace!("my ttl_secs: {ttl_secs}, keep alive rtt: {keep_alive_rtt:?}");
                             match res {
                                 Some(Ok(keep_alive_resp)) => {
                                     if keep_alive_resp.ttl() == 0 {
-                                        error!("lease {lease_id:?} expired, since_last_keek_alive: {since_last_keep_alive:?}");
+                                        error!("lease {lease_id:?} expired");
                                         break 'outer;
                                     }
                                     let ttl = keep_alive_resp.ttl();
@@ -174,7 +170,7 @@ impl ManagedLeaseFactory {
                         //     }
                         // }
                         _ = &mut stop_rx => {
-                            let since_last_keep_alive = t.elapsed();
+                            let since_last_keep_alive = last_keep_alive.elapsed();
                             tracing::info!("revoking lease {lease_id:?}, last keep alive: {since_last_keep_alive:?}");
                             
                             let result = retry_etcd(

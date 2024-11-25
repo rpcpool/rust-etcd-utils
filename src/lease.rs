@@ -127,7 +127,7 @@ impl ManagedLeaseFactory {
                             let sent_keepalive_at = Instant::now();
                             
                             let since_last_keep_alive = t.elapsed();
-                            tracing::info!("my ttl_secs: {ttl_secs}, got {since_last_keep_alive:?}");
+                            tracing::trace!("my ttl_secs: {ttl_secs}, got {since_last_keep_alive:?}");
                             let t2 = Instant::now();
                             if let Err(e) = keeper.keep_alive().await {
                                 error!("failed to keep alive lease {lease_id:?}, got {e:?}");
@@ -135,7 +135,7 @@ impl ManagedLeaseFactory {
                             }
                             let res = keep_alive_resp_stream.next().await;
                             let keep_alive_rtt = t2.elapsed();
-                            tracing::info!("my ttl_secs: {ttl_secs}, keep alive rtt: {keep_alive_rtt:?}");
+                            tracing::trace!("my ttl_secs: {ttl_secs}, keep alive rtt: {keep_alive_rtt:?}");
                             match res {
                                 Some(Ok(_)) => {
                                     // next_renewal = Instant::now() + keepalive_interval;
@@ -152,7 +152,9 @@ impl ManagedLeaseFactory {
                             }
                         }
                         _ = &mut stop_rx => {
-                            tracing::trace!("revoking lease {lease_id:?}");
+                            let since_last_keep_alive = t.elapsed();
+                            tracing::info!("revoking lease {lease_id:?}, last keep alive: {since_last_keep_alive:?}");
+                            
                             let result = retry_etcd(
                                 client.clone(),
                                 (lease_id,),
@@ -162,6 +164,7 @@ impl ManagedLeaseFactory {
                                             Ok(_) => Ok(()),
                                             Err(etcd_client::Error::GRpcStatus(status)) => {
                                                 if status.code() == tonic::Code::NotFound {
+                                                    tracing::warn!("lease {lease_id:?} was already deleted");
                                                     Ok(())
                                                 } else {
                                                     Err(etcd_client::Error::GRpcStatus(status))

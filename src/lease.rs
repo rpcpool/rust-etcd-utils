@@ -111,7 +111,7 @@ impl ManagedLeaseFactory {
                             match res {
                                 Some(Ok(_)) => {
                                     // next_renewal = Instant::now() + keepalive_interval;
-                                    tracing::info!("keep alive lease {lease_id:?} at {sent_keepalive_at:?}");
+                                    tracing::trace!("keep alive lease {lease_id:?} at {sent_keepalive_at:?}");
                                 }
                                 Some(Err(e)) => {
                                     warn!("keep alive stream for lease {lease_id:?} errored: {e:?}");
@@ -124,6 +124,7 @@ impl ManagedLeaseFactory {
                             }
                         }
                         _ = &mut stop_rx => {
+                            tracing::trace!("revoking lease {lease_id:?}");
                             let result = retry_etcd(
                                 client.clone(),
                                 (lease_id,),

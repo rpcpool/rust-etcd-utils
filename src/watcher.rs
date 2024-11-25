@@ -6,7 +6,7 @@ use {
     serde::de::DeserializeOwned,
     tokio::sync::{broadcast, mpsc},
     tokio_stream::StreamExt,
-    tracing::{error, warn},
+    tracing::{error, info, warn},
 };
 
 ///
@@ -253,6 +253,7 @@ pub trait WatchClientExt {
                                     if revision <= key_mod_revision {
                                         continue;
                                     }
+                                    info!("watcher detected put event on key {key:?} with revision {revision} > {key_mod_revision}");
                                     let _ = tx.send(revision);
                                     let _ = watcher.cancel().await;
                                     break 'outer;
@@ -265,6 +266,7 @@ pub trait WatchClientExt {
                                     }
 
                                     if kv.key() == key {
+                                        info!("watcher detected delete event on key {key:?} with revision {revision} >= {key_mod_revision}");
                                         let _ = tx.send(revision);
                                         let _ = watcher.cancel().await;
                                         break 'outer;

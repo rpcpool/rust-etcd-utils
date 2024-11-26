@@ -212,3 +212,59 @@ async fn lock_revoke_notify_should_notify_even_if_lock_is_revoke_before_construc
     let _ = revoke_notify1.wait_for_revoke().await;
     let _ = revoke_notify2.wait_for_revoke().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn revoke_notify_should_be_completly_independent() {
+    let etcd = common::get_etcd_client().await;
+    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+
+    let lock_name = random_str(10);
+
+    let managed_lock1 = lock_man
+        .try_lock(lock_name, Duration::from_secs(10))
+        .await
+        .expect("failed to lock");
+
+    // Construction is here
+    let revoke_notify1 = managed_lock1.get_revoke_notify();
+    let revoke_notify2 = managed_lock1.get_revoke_notify();
+
+    let h = tokio::spawn(async move {
+        println!("Waiting for revoke");
+        revoke_notify1.wait_for_revoke().await;
+        println!("Revoke 1 is done");
+    });
+
+    let mut i = 0;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                i += 1;
+                if i == 1 {
+                    h.abort();
+                }
+                if i == 3 {
+                    break;
+                }
+                println!("Lock is still alive - {i}");
+            }
+            _ = revoke_notify2.clone().wait_for_revoke() => {
+                println!("Lock is revoked");
+                break;
+            }
+        }
+    }
+
+    println!("Awaiting for h");
+    let result = h.await;
+    assert!(result.unwrap_err().is_cancelled());
+
+    let lock_key = managed_lock1.get_key();
+    etcd.kv_client()
+        .delete(lock_key, None)
+        .await
+        .expect("failed to delete key");
+    // The lock is already revoked, so the future should return immediately
+    let _ = revoke_notify2.wait_for_revoke().await;
+}

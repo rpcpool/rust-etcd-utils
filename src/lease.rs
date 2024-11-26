@@ -7,7 +7,7 @@ use {
         task::JoinSet,
         time::Instant,
     },
-    tracing::{error, trace, warn},
+    tracing::{error, warn},
 };
 
 // Jiffy is interval between system timer interrupts, typically 10ms for linux systems.
@@ -36,7 +36,6 @@ pub struct ManagedLeaseFactory {
 
 impl ManagedLeaseFactory {
     pub fn new(etcd: etcd_client::Client) -> Self {
-
         let js = Arc::new(Mutex::new(JoinSet::new()));
         let js2 = Arc::clone(&js);
 
@@ -56,11 +55,7 @@ impl ManagedLeaseFactory {
             }
         });
 
-
-        Self {
-            etcd,
-            js: js,
-        }
+        Self { etcd, js }
     }
 
     ///
@@ -111,7 +106,6 @@ impl ManagedLeaseFactory {
                     })
                         .await
                         .expect("failed to keep alive lease");  // if we have an error this will break out the entire loop
-                
                 let mut last_keep_alive = first_keep_alive;
                 let keepalive_interval =
                     keepalive_interval.unwrap_or(Duration::from_secs((ttl_secs / 2) as u64));
@@ -154,25 +148,9 @@ impl ManagedLeaseFactory {
                                 }
                             }
                         }
-                        // result = keep_alive_resp_stream.next() => {
-                        //     match result {
-                        //         Some(Ok(_)) => {
-                        //             tracing::warn!("unexpected keep alive response");
-                        //         }
-                        //         Some(Err(e)) => {
-                        //             warn!("keep alive stream for lease {lease_id:?} errored: {e:?}");
-                        //             break 'inner;
-                        //         }
-                        //         None => {
-                        //             warn!("keep alive stream for lease {lease_id:?} ended");
-                        //             break 'inner;
-                        //         }
-                        //     }
-                        // }
                         _ = &mut stop_rx => {
                             let since_last_keep_alive = last_keep_alive.elapsed();
                             tracing::info!("revoking lease {lease_id:?}, last keep alive: {since_last_keep_alive:?}");
-                            
                             let result = retry_etcd(
                                 client.clone(),
                                 (lease_id,),

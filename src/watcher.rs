@@ -215,8 +215,7 @@ pub trait WatchClientExt {
 
         let tx2 = tx.clone();
         tokio::spawn(async move {
-            let wopts = WatchOptions::new()
-                .with_start_revision(key_mod_revision);
+            let wopts = WatchOptions::new().with_start_revision(key_mod_revision);
             let tx = tx2;
             'outer: loop {
                 let key2 = key.clone();
@@ -242,7 +241,6 @@ pub trait WatchClientExt {
                         }
 
                         for event in watch_resp.events() {
-
                             match event.event_type() {
                                 EventType::Put => {
                                     let kv = event.kv().expect("put event with no kv");
@@ -272,7 +270,6 @@ pub trait WatchClientExt {
                                         let _ = watcher.cancel().await;
                                         break 'outer;
                                     }
-                                    
                                 }
                             }
                         }

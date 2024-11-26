@@ -27,15 +27,15 @@ pub fn is_transient(err: &etcd_client::Error) -> bool {
                                 true
                             }
                             None => {
-                                return false;
+                                false
                             }
                         }
                     }
                     None => {
-                        return true;
+                        true
                     }
                 }
-            },
+            }
             tonic::Code::InvalidArgument => false,
             tonic::Code::DeadlineExceeded => true,
             tonic::Code::NotFound => false,

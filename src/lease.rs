@@ -117,7 +117,9 @@ impl ManagedLeaseFactory {
                             let since_last_keep_alive = last_keep_alive.elapsed();
                             if since_last_keep_alive > keepalive_interval {
                                 let dt = since_last_keep_alive - keepalive_interval;
-                                warn!("last keep alive was {dt:?} late");
+                                if dt >= AT_LEAST_10_JIFFIES {
+                                    warn!("last keep alive was {dt:?} late");
+                                }
                             }
                             if let Err(e) = keeper.keep_alive().await {
                                 error!("failed to keep alive lease {lease_id:?}, got {e:?}");

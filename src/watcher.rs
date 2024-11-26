@@ -6,7 +6,7 @@ use {
     serde::de::DeserializeOwned,
     tokio::sync::{broadcast, mpsc},
     tokio_stream::StreamExt,
-    tracing::{error, warn},
+    tracing::{error, info, warn},
 };
 
 ///
@@ -201,26 +201,25 @@ pub trait WatchClientExt {
     }
 
     ///
-    /// Creates a broadcast channel that watches for a key to deleted.
+    /// Creates a broadcast channel that watches for a lock key that gets deleted.
     ///
-    fn watch_key_delete(
+    fn watch_lock_key_change(
         &self,
         key: impl Into<Vec<u8>>,
-        revision: Revision,
+        key_mod_revision: Revision,
     ) -> broadcast::Sender<Revision> {
         let wc = self.get_watch_client();
-        let key = key.into();
+        let key: Vec<u8> = key.into();
 
         let (tx, _) = broadcast::channel(1);
 
         let tx2 = tx.clone();
         tokio::spawn(async move {
-            let wopts = WatchOptions::new()
-                .with_start_revision(revision)
-                .with_filters(vec![WatchFilterType::NoPut]);
+            let wopts = WatchOptions::new().with_start_revision(key_mod_revision);
             let tx = tx2;
             'outer: loop {
                 let key2 = key.clone();
+                let key = key.clone();
                 let retry_strategy = Exponential::from_millis_with_factor(10, 10.0).take(3);
                 let wc2 = wc.clone();
                 let wopts2 = wopts.clone();
@@ -242,12 +241,36 @@ pub trait WatchClientExt {
                         }
 
                         for event in watch_resp.events() {
-                            if let EventType::Delete = event.event_type() {
-                                let kv = event.kv().expect("delete event with no kv");
-                                let revision = kv.mod_revision();
-                                let _ = tx.send(revision);
-                                let _ = watcher.cancel().await;
-                                break 'outer;
+                            match event.event_type() {
+                                EventType::Put => {
+                                    let kv = event.kv().expect("put event with no kv");
+                                    if kv.key() == key {
+                                        continue;
+                                    }
+                                    let revision = kv.mod_revision();
+                                    if revision <= key_mod_revision {
+                                        continue;
+                                    }
+                                    info!("watcher detected put event on key {key:?} with revision {revision} > {key_mod_revision}");
+                                    let _ = tx.send(revision);
+                                    let _ = watcher.cancel().await;
+                                    break 'outer;
+                                }
+                                EventType::Delete => {
+                                    let kv = event.kv().expect("delete event with no kv");
+                                    let revision = kv.mod_revision();
+                                    if revision < key_mod_revision {
+                                        continue;
+                                    }
+
+                                    if kv.key() == key {
+                                        let key_label = String::from_utf8_lossy(&key);
+                                        info!("watcher detected delete event on key {key_label:?} with revision {revision} >= {key_mod_revision}");
+                                        let _ = tx.send(revision);
+                                        let _ = watcher.cancel().await;
+                                        break 'outer;
+                                    }
+                                }
                             }
                         }
                     }

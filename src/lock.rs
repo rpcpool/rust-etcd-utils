@@ -369,7 +369,7 @@ impl LockManager {
         let watch_lock_delete = self
             .etcd
             .watch_client()
-            .watch_key_delete(lock_key.clone(), revision);
+            .watch_lock_key_change(lock_key.clone(), revision);
         Ok(ManagedLock {
             lock_key,
             managed_lease,
@@ -421,7 +421,7 @@ impl LockManager {
         let watch_lock_delete = self
             .etcd
             .watch_client()
-            .watch_key_delete(lock_key.clone(), revision);
+            .watch_lock_key_change(lock_key.clone(), revision);
 
         let managed_lock = ManagedLock {
             lock_key,
@@ -450,6 +450,10 @@ pub struct ManagedLock {
 
 impl Drop for ManagedLock {
     fn drop(&mut self) {
+        info!(
+            "Destructor called for ManagedLock({})",
+            String::from_utf8_lossy(&self.lock_key)
+        );
         let _ = self
             .delete_signal_tx
             .send(DeleteQueueCommand::Delete(self.lock_key.clone()));
@@ -576,23 +580,13 @@ impl ManagedLock {
                 return Err(LockError::LockRevoked);
             }
             Err(broadcast::error::TryRecvError::Closed) => {
-                panic!("revoke callback channel is closed");
+                return Err(LockError::LockRevoked);
             }
             _ => {}
         }
         tokio::select! {
-            result = func() => {
-                Ok(result)
-            }
-            result = rx.recv() => {
-                match result {
-                    Err(e) => panic!("failed to receive revoke callback: {e}"),
-                    Ok(_rev) => {
-                        Err(LockError::LockRevoked)
-                    }
-                }
-
-            }
+            result = func() => Ok(result),
+            _ = rx.recv() => Err(LockError::LockRevoked),
         }
     }
 }

@@ -7,7 +7,7 @@ use {
         task::JoinSet,
         time::Instant,
     },
-    tracing::{error, trace, warn},
+    tracing::{error, warn},
 };
 
 // Jiffy is interval between system timer interrupts, typically 10ms for linux systems.
@@ -36,10 +36,26 @@ pub struct ManagedLeaseFactory {
 
 impl ManagedLeaseFactory {
     pub fn new(etcd: etcd_client::Client) -> Self {
-        Self {
-            etcd,
-            js: Arc::new(Mutex::new(JoinSet::new())),
-        }
+        let js = Arc::new(Mutex::new(JoinSet::new()));
+        let js2 = Arc::clone(&js);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                {
+                    let mut lock = js2.lock().await;
+                    while let Some(result) = lock.try_join_next() {
+                        if let Err(e) = result {
+                            error!("detected managed lease thread failed with: {e:?}");
+                        } else {
+                            tracing::info!("detected managed lease thread finished");
+                        }
+                    }
+                }
+            }
+        });
+
+        Self { etcd, js }
     }
 
     ///
@@ -77,14 +93,9 @@ impl ManagedLeaseFactory {
         let client = self.etcd.clone();
         let mut lock = self.js.lock().await;
 
-        while let Some(result) = lock.try_join_next() {
-            if let Err(e) = result {
-                error!("failed to join handle, got {e:?}");
-            }
-        }
-
         let _ = lock.spawn(async move {
             'outer: loop {
+                let first_keep_alive  = Instant::now();
                 let (mut keeper, mut keep_alive_resp_stream) = retry_etcd(
                     client.clone(),
                     (lease_id,),
@@ -95,23 +106,39 @@ impl ManagedLeaseFactory {
                     })
                         .await
                         .expect("failed to keep alive lease");  // if we have an error this will break out the entire loop
-
+                let mut last_keep_alive = first_keep_alive;
                 let keepalive_interval =
                     keepalive_interval.unwrap_or(Duration::from_secs((ttl_secs / 2) as u64));
+                let adjusted_interval = keepalive_interval - AT_LEAST_10_JIFFIES;
+                let mut next_renewal = first_keep_alive + adjusted_interval;
                 'inner: loop {
-                    let next_renewal = Instant::now() + keepalive_interval - AT_LEAST_10_JIFFIES;
                     tokio::select! {
                         _ = tokio::time::sleep_until(next_renewal) => {
-                            let sent_keepalive_at = Instant::now();
+                            let since_last_keep_alive = last_keep_alive.elapsed();
+                            if since_last_keep_alive > keepalive_interval {
+                                let dt = since_last_keep_alive - keepalive_interval;
+                                if dt >= AT_LEAST_10_JIFFIES {
+                                    warn!("last keep alive was {dt:?} late");
+                                }
+                            }
                             if let Err(e) = keeper.keep_alive().await {
                                 error!("failed to keep alive lease {lease_id:?}, got {e:?}");
                                 break 'inner;
                             }
+                            last_keep_alive = Instant::now();
+                            next_renewal += adjusted_interval;
                             let res = keep_alive_resp_stream.next().await;
                             match res {
-                                Some(Ok(_)) => {
-                                    // next_renewal = Instant::now() + keepalive_interval;
-                                    trace!("keep alive lease {lease_id:?} at {sent_keepalive_at:?}");
+                                Some(Ok(keep_alive_resp)) => {
+                                    if keep_alive_resp.ttl() == 0 {
+                                        error!("lease {lease_id:?} expired");
+                                        break 'outer;
+                                    }
+                                    let ttl = keep_alive_resp.ttl();
+                                    if ttl < ttl_secs {
+                                        warn!("lease {lease_id:?} ttl reduced to {ttl}, since_last_keep_alive: {since_last_keep_alive:?}");
+                                    }
+                                    tracing::trace!("keep alive lease {lease_id:?} at {since_last_keep_alive:?}");
                                 }
                                 Some(Err(e)) => {
                                     warn!("keep alive stream for lease {lease_id:?} errored: {e:?}");
@@ -124,6 +151,8 @@ impl ManagedLeaseFactory {
                             }
                         }
                         _ = &mut stop_rx => {
+                            let since_last_keep_alive = last_keep_alive.elapsed();
+                            tracing::info!("revoking lease {lease_id:?}, last keep alive: {since_last_keep_alive:?}");
                             let result = retry_etcd(
                                 client.clone(),
                                 (lease_id,),
@@ -133,6 +162,7 @@ impl ManagedLeaseFactory {
                                             Ok(_) => Ok(()),
                                             Err(etcd_client::Error::GRpcStatus(status)) => {
                                                 if status.code() == tonic::Code::NotFound {
+                                                    tracing::warn!("lease {lease_id:?} was already deleted");
                                                     Ok(())
                                                 } else {
                                                     Err(etcd_client::Error::GRpcStatus(status))

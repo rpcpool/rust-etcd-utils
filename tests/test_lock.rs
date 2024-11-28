@@ -1,11 +1,32 @@
-use std::time::Duration;
+use std::{
+    io::{self, IsTerminal},
+    time::Duration,
+};
 
 use common::random_str;
 use rust_etcd_utils::{
     lease::ManagedLeaseFactory,
     lock::{spawn_lock_manager, TryLockError},
 };
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 mod common;
+
+pub fn setup_tracing() {
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    let subscriber = tracing_subscriber::registry().with(env_filter);
+
+    let is_atty = io::stdout().is_terminal() && io::stderr().is_terminal();
+    let io_layer = tracing_subscriber::fmt::layer()
+        .with_line_number(true)
+        .with_ansi(is_atty);
+    subscriber
+        .with(io_layer)
+        .try_init()
+        .expect("failed to setup tracing");
+}
 
 #[tokio::test]
 async fn test_locking() {

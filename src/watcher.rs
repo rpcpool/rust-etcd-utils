@@ -215,73 +215,70 @@ pub trait WatchClientExt {
 
         let tx2 = tx.clone();
         tokio::spawn(async move {
-            let wopts = WatchOptions::new().with_start_revision(key_mod_revision);
             let tx = tx2;
             'outer: loop {
                 let key2 = key.clone();
                 let key = key.clone();
+                let wopts = WatchOptions::new().with_start_revision(key_mod_revision);
                 let retry_strategy = Exponential::from_millis_with_factor(10, 10.0).take(3);
                 let wc2 = wc.clone();
-                let wopts2 = wopts.clone();
                 let (mut watcher, mut stream) = retry_etcd_legacy(retry_strategy, move || {
                     let mut wc = wc2.clone();
                     let key = key2.clone();
-                    let wopts = wopts2.clone();
+                    let wopts = wopts.clone();
                     async move { wc.watch(key.clone(), Some(wopts)).await }
                 })
                 .await
                 .expect("watch retry failed");
 
-                match stream.next().await {
-                    Some(Ok(watch_resp)) => {
-                        if watch_resp.canceled() {
-                            // This is probably because the compaction_revision < initial revision
-                            error!("watch cancelled: {watch_resp:?}");
-                            break;
-                        }
-
-                        for event in watch_resp.events() {
-                            match event.event_type() {
-                                EventType::Put => {
-                                    let kv = event.kv().expect("put event with no kv");
-                                    if kv.key() == key {
-                                        continue;
-                                    }
-                                    let revision = kv.mod_revision();
-                                    if revision <= key_mod_revision {
-                                        continue;
-                                    }
-                                    info!("watcher detected put event on key {key:?} with revision {revision} > {key_mod_revision}");
-                                    let _ = tx.send(revision);
-                                    let _ = watcher.cancel().await;
-                                    break 'outer;
-                                }
-                                EventType::Delete => {
-                                    let kv = event.kv().expect("delete event with no kv");
-                                    let revision = kv.mod_revision();
-                                    if revision < key_mod_revision {
-                                        continue;
-                                    }
-
-                                    if kv.key() == key {
-                                        let key_label = String::from_utf8_lossy(&key);
-                                        info!("watcher detected delete event on key {key_label:?} with revision {revision} >= {key_mod_revision}");
+                'inner: while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(watch_resp) => {
+                            if watch_resp.canceled() {
+                                // This is probably because the compaction_revision < initial revision
+                                error!("watch cancelled: {watch_resp:?}");
+                                break 'inner;
+                            }
+                            for event in watch_resp.events() {
+                                match event.event_type() {
+                                    EventType::Put => {
+                                        let kv = event.kv().expect("put event with no kv");
+                                        if kv.key() == key {
+                                            continue;
+                                        }
+                                        let revision = kv.mod_revision();
+                                        if revision <= key_mod_revision {
+                                            continue 'inner;
+                                        }
+                                        info!("watcher detected put event on key {key:?} with revision {revision} > {key_mod_revision}");
                                         let _ = tx.send(revision);
                                         let _ = watcher.cancel().await;
                                         break 'outer;
                                     }
+                                    EventType::Delete => {
+                                        let kv = event.kv().expect("delete event with no kv");
+                                        let revision = kv.mod_revision();
+                                        if revision < key_mod_revision {
+                                            continue;
+                                        }
+
+                                        if kv.key() == key {
+                                            let key_label = String::from_utf8_lossy(&key);
+                                            info!("watcher detected delete event on key {key_label:?} with revision {revision} >= {key_mod_revision}");
+                                            let _ = tx.send(revision);
+                                            let _ = watcher.cancel().await;
+                                            break 'outer;
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
-                    Some(Err(e)) => {
-                        if !is_transient(&e) {
-                            tracing::error!("watch stream error: {e}");
-                            break;
+                        Err(e) => {
+                            if !is_transient(&e) {
+                                tracing::error!("watch stream error: {e}");
+                                break 'outer;
+                            }
                         }
-                    }
-                    None => {
-                        tracing::warn!("watch stream closed");
                     }
                 }
                 let _ = watcher.cancel().await;

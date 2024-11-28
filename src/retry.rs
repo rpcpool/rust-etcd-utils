@@ -26,14 +26,10 @@ pub fn is_transient(err: &etcd_client::Error) -> bool {
                                 // Because if the error is a transport error, it's likely a transient error due to connection reset.
                                 true
                             }
-                            None => {
-                                false
-                            }
+                            None => false,
                         }
                     }
-                    None => {
-                        true
-                    }
+                    None => true,
                 }
             }
             tonic::Code::InvalidArgument => false,

@@ -1,49 +1,11 @@
-use std::{
-    io::{self, IsTerminal},
-    time::Duration,
-};
+use std::time::Duration;
 
 use common::random_str;
 use rust_etcd_utils::{
     lease::ManagedLeaseFactory,
     lock::{spawn_lock_manager, TryLockError},
 };
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 mod common;
-
-pub fn setup_tracing() {
-    let env_filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-    let subscriber = tracing_subscriber::registry().with(env_filter);
-
-    let is_atty = io::stdout().is_terminal() && io::stderr().is_terminal();
-    let io_layer = tracing_subscriber::fmt::layer()
-        .with_line_number(true)
-        .with_ansi(is_atty);
-    subscriber
-        .with(io_layer)
-        .try_init()
-        .expect("failed to setup tracing");
-}
-
-#[tokio::test]
-async fn test_locking() {
-    let etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-    let (lock_man_handle, lock_man) =
-        spawn_lock_manager(etcd.clone(), managed_lease_factory.clone());
-    let lock_name = random_str(10);
-    lock_man
-        .try_lock(lock_name, Duration::from_secs(10))
-        .await
-        .expect("failed to lock");
-    drop(lock_man);
-    lock_man_handle
-        .await
-        .expect("failed to release lock manager handle");
-}
 
 #[tokio::test]
 async fn it_should_failed_to_lock_already_taken_lock() {
@@ -59,6 +21,51 @@ async fn it_should_failed_to_lock_already_taken_lock() {
     let result = lock_man.try_lock(lock_name, Duration::from_secs(10)).await;
 
     assert!(matches!(result, Err(TryLockError::AlreadyTaken)));
+}
+
+#[tokio::test]
+async fn try_lock_should_fail_with_expired_lease() {
+    let etcd = common::get_etcd_client().await;
+    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let managed_lease = managed_lease_factory
+        .new_lease(Duration::from_secs(10), None)
+        .await
+        .expect("failed to create lease");
+    let (_lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+    let lease_id = managed_lease.lease_id();
+    let _ = etcd
+        .lease_client()
+        .revoke(lease_id)
+        .await
+        .expect("failed to revoke lease");
+    let lock_name = random_str(10);
+    let result = lock_man
+        .try_lock_with_lease(lock_name.as_str(), managed_lease)
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn lock_should_fail_with_expired_lease() {
+    let etcd = common::get_etcd_client().await;
+    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let managed_lease = managed_lease_factory
+        .new_lease(Duration::from_secs(10), None)
+        .await
+        .expect("failed to create lease");
+    let (_lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+    let lease_id = managed_lease.lease_id();
+    let _ = etcd
+        .lease_client()
+        .revoke(lease_id)
+        .await
+        .expect("failed to revoke lease");
+    let lock_name = random_str(10);
+    let result = lock_man
+        .lock_with_lease(lock_name.as_str(), managed_lease)
+        .await;
+
+    assert!(matches!(result, Ok(None) | Err(_)));
 }
 
 #[tokio::test]
@@ -268,6 +275,7 @@ async fn revoke_notify_should_be_completly_independent() {
                 if i == 3 {
                     break;
                 }
+                assert!(managed_lock1.is_alive().await);
                 println!("Lock is still alive - {i}");
             }
             _ = revoke_notify2.clone().wait_for_revoke() => {
@@ -288,4 +296,29 @@ async fn revoke_notify_should_be_completly_independent() {
         .expect("failed to delete key");
     // The lock is already revoked, so the future should return immediately
     let _ = revoke_notify2.wait_for_revoke().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_should_notify_revoke_when_underlying_lease_expire() {
+    let etcd = common::get_etcd_client().await;
+    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+
+    let lock_name = random_str(10);
+
+    let managed_lock1 = lock_man
+        .try_lock(lock_name, Duration::from_secs(10))
+        .await
+        .expect("failed to lock");
+
+    let revoked_notify = managed_lock1.get_revoke_notify();
+    let lease_id = managed_lock1.get_managed_lease_weak_ref().lease_id();
+    etcd.lease_client()
+        .revoke(lease_id)
+        .await
+        .expect("failed to revoke lease");
+
+    tokio::time::timeout(Duration::from_secs(5), revoked_notify.wait_for_revoke())
+        .await
+        .expect("failed to wait for revoke");
 }

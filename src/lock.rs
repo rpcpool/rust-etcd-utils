@@ -39,6 +39,7 @@ use {
         Revision,
     },
     crate::{
+        lease::{LeaseExpiredNotify, ManagedLeaseWeak},
         retry::{retry_etcd, retry_etcd_txn},
         watcher::WatchClientExt,
     },
@@ -81,7 +82,7 @@ pub struct LockManager {
     etcd: etcd_client::Client,
     delete_queue_tx: mpsc::UnboundedSender<DeleteQueueCommand>,
     manager_lease_factory: ManagedLeaseFactory,
-
+    try_locking_timeout: Duration,
     #[allow(dead_code)]
     // When all Sender to this channel is dropped, the Lock manager background thread will stop.
     lock_manager_handle_entangled_tx: mpsc::UnboundedSender<()>,
@@ -142,12 +143,14 @@ impl Future for LockManagerHandle {
 ///
 pub struct ManagedLockRevokeNotify {
     watch_lock_delete: broadcast::Receiver<Revision>,
+    lease_expired_notify: LeaseExpiredNotify,
 }
 
 impl Clone for ManagedLockRevokeNotify {
     fn clone(&self) -> Self {
         Self {
             watch_lock_delete: self.watch_lock_delete.resubscribe(),
+            lease_expired_notify: self.lease_expired_notify.clone(),
         }
     }
 }
@@ -157,7 +160,10 @@ impl ManagedLockRevokeNotify {
     /// Wait for the lock to be revoked.
     ///
     pub async fn wait_for_revoke(mut self) {
-        let _ = self.watch_lock_delete.recv().await;
+        tokio::select! {
+            _ = self.lease_expired_notify.recv() => {}
+            _ = self.watch_lock_delete.recv() => {}
+        }
     }
 }
 
@@ -295,6 +301,7 @@ pub fn spawn_lock_manager(
         LockManager {
             etcd,
             delete_queue_tx: tx,
+            try_locking_timeout: Duration::from_secs(1),
             manager_lease_factory: managed_lease_factory,
             lock_manager_handle_entangled_tx: entangled_tx,
         },
@@ -329,7 +336,6 @@ impl LockManager {
             panic!("LockManager lifecycle thread is stopped.");
         }
         let gopts = GetOptions::new().with_prefix();
-        const TRY_LOCKING_DURATION: Duration = Duration::from_millis(500);
         trace!("Trying to lock {name}...");
         let get_response = retry_etcd(
             self.etcd.clone(),
@@ -356,13 +362,121 @@ impl LockManager {
             |mut etcd, (name, opts)| async move { etcd.lock(name, Some(opts)).await },
         );
 
+        let lease_expire_notify = managed_lease.get_lease_expire_notify();
+
+        let (revision, lock_key) = tokio::select! {
+            _ = tokio::time::sleep(self.try_locking_timeout) => {
+                return Err(TryLockError::LockingDeadlineExceeded)
+            }
+            result = lock_fut => {
+                let lock_response = match result {
+                    Ok(lock_response) => lock_response,
+                    Err(e) => {
+                        match e {
+                            etcd_client::Error::GRpcStatus(status) => {
+                                if status.code() == Code::Unknown {
+                                    if status.message() == "etcdserver: requested lease not found" {
+                                        return Err(TryLockError::LeaseExpired)
+                                    } else {
+                                        return Err(TryLockError::EtcdError(etcd_client::Error::GRpcStatus(status)))
+                                    }
+                                } else {
+                                    return Err(TryLockError::EtcdError(etcd_client::Error::GRpcStatus(status)))
+                                }
+                            }
+                            _ => return Err(TryLockError::EtcdError(e))
+                        }
+                    }
+                };
+                (lock_response.header().expect("empty header for etcd lock").revision(), lock_response.key().to_vec())
+            }
+            _ = lease_expire_notify.recv() => {
+                return Err(TryLockError::LeaseExpired)
+            }
+        };
+
+        let watch_lock_delete = self
+            .etcd
+            .watch_client()
+            .watch_lock_key_change(lock_key.clone(), revision);
+        Ok(ManagedLock {
+            lock_key,
+            managed_lease,
+            etcd: self.etcd.clone(),
+            created_at_revision: revision,
+            delete_signal_tx: self.delete_queue_tx.clone(),
+            revoke_callback_rx: watch_lock_delete.subscribe(),
+        })
+    }
+
+    ///
+    /// Similar to [`LockManager::try_lock`] but with a custom lease.
+    ///
+    pub async fn try_lock_with_lease<S>(
+        &self,
+        name: S,
+        managed_lease: ManagedLease,
+    ) -> Result<ManagedLock, TryLockError>
+    where
+        S: AsRef<str>,
+    {
+        let name = name.as_ref();
+        if self.delete_queue_tx.is_closed() {
+            panic!("LockManager lifecycle thread is stopped.");
+        }
+        let gopts = GetOptions::new().with_prefix();
+        const TRY_LOCKING_DURATION: Duration = Duration::from_millis(1000);
+        trace!("Trying to lock {name}...");
+        let get_response = retry_etcd(
+            self.etcd.clone(),
+            (name.to_string(), gopts),
+            move |etcd, (name, gopts)| async move { etcd.kv_client().get(name, Some(gopts)).await },
+        )
+        .await
+        .map_err(TryLockError::EtcdError)?;
+
+        if get_response.count() > 0 {
+            return Err(TryLockError::AlreadyTaken);
+        }
+
+        let lease_id = managed_lease.lease_id;
+
+        let lock_fut = retry_etcd(
+            self.etcd.clone(),
+            (name.to_string(), LockOptions::new().with_lease(lease_id)),
+            |mut etcd, (name, opts)| async move { etcd.lock(name, Some(opts)).await },
+        );
+
+        let lease_expire_notify = managed_lease.get_lease_expire_notify();
         let (revision, lock_key) = tokio::select! {
             _ = tokio::time::sleep(TRY_LOCKING_DURATION) => {
                 return Err(TryLockError::LockingDeadlineExceeded)
             }
             result = lock_fut => {
-                let lock_response = result.expect("failed to lock");
+                let lock_response = match result {
+                    Ok(lock_response) => lock_response,
+                    Err(e) => {
+                        match e {
+                            etcd_client::Error::GRpcStatus(status) => {
+                                if status.code() == Code::Unknown {
+                                    if status.message() == "etcdserver: requested lease not found" {
+                                        return Err(TryLockError::LeaseExpired)
+                                    } else {
+                                        return Err(TryLockError::EtcdError(etcd_client::Error::GRpcStatus(status)))
+                                    }
+                                } else {
+                                    return Err(TryLockError::EtcdError(etcd_client::Error::GRpcStatus(status)))
+                                }
+                            }
+                            _ => return Err(TryLockError::EtcdError(e))
+                        }
+                    }
+                };
+
                 (lock_response.header().expect("empty header for etcd lock").revision(), lock_response.key().to_vec())
+            }
+            _ = lease_expire_notify.recv() => {
+                return Err(TryLockError::LeaseExpired)
             }
         };
 
@@ -389,7 +503,28 @@ impl LockManager {
         &self,
         name: S,
         lease_duration: Duration,
-    ) -> Result<ManagedLock, etcd_client::Error>
+    ) -> Result<Option<ManagedLock>, etcd_client::Error>
+    where
+        S: AsRef<str>,
+    {
+        if self.delete_queue_tx.is_closed() {
+            panic!("LockManager lifecycle thread is stopped.");
+        }
+        let managed_lease = self
+            .manager_lease_factory
+            .new_lease(lease_duration, None)
+            .await?;
+        self.lock_with_lease(name, managed_lease).await
+    }
+
+    ///
+    /// Similar to [`LockManager::lock`] but with a custom lease.
+    ///
+    pub async fn lock_with_lease<S>(
+        &self,
+        name: S,
+        managed_lease: ManagedLease,
+    ) -> Result<Option<ManagedLock>, etcd_client::Error>
     where
         S: AsRef<str>,
     {
@@ -397,18 +532,25 @@ impl LockManager {
             panic!("LockManager lifecycle thread is stopped.");
         }
         let name = name.as_ref();
-        let managed_lease = self
-            .manager_lease_factory
-            .new_lease(lease_duration, None)
-            .await?;
+
         let lease_id = managed_lease.lease_id;
 
-        let lock_response = retry_etcd(
+        let lease_expire_notify = managed_lease.get_lease_expire_notify();
+
+        let lock_fut = retry_etcd(
             self.etcd.clone(),
             (name.to_string(), LockOptions::new().with_lease(lease_id)),
             |mut etcd, (name, opts)| async move { etcd.lock(name, Some(opts)).await },
-        )
-        .await?;
+        );
+
+        let lock_response = tokio::select! {
+            _ = lease_expire_notify.recv() => {
+                return Ok(None)
+            }
+            result = lock_fut => {
+                result?
+            }
+        };
 
         let (revision, lock_key) = (
             lock_response
@@ -432,7 +574,7 @@ impl LockManager {
             revoke_callback_rx: watch_lock_delete.subscribe(),
         };
 
-        Ok(managed_lock)
+        Ok(Some(managed_lock))
     }
 }
 
@@ -446,6 +588,16 @@ pub struct ManagedLock {
     etcd: etcd_client::Client,
     delete_signal_tx: tokio::sync::mpsc::UnboundedSender<DeleteQueueCommand>,
     revoke_callback_rx: broadcast::Receiver<Revision>,
+}
+
+impl fmt::Debug for ManagedLock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManagedLock")
+            .field("lock_key", &String::from_utf8_lossy(&self.lock_key))
+            .field("lease_id", &self.managed_lease.lease_id)
+            .field("created_At_revision", &self.created_at_revision)
+            .finish()
+    }
 }
 
 impl Drop for ManagedLock {
@@ -504,6 +656,7 @@ impl ManagedLock {
     pub fn get_revoke_notify(&self) -> ManagedLockRevokeNotify {
         ManagedLockRevokeNotify {
             watch_lock_delete: self.revoke_callback_rx.resubscribe(),
+            lease_expired_notify: self.managed_lease.get_lease_expire_notify(),
         }
     }
 
@@ -589,6 +742,13 @@ impl ManagedLock {
             _ = rx.recv() => Err(LockError::LockRevoked),
         }
     }
+
+    ///
+    /// Get a weak reference to the managed lease.
+    ///
+    pub fn get_managed_lease_weak_ref(&self) -> ManagedLeaseWeak {
+        self.managed_lease.get_weak()
+    }
 }
 
 ///
@@ -600,6 +760,8 @@ pub enum TryLockError {
     AlreadyTaken,
     #[error("Locking deadline exceeded")]
     LockingDeadlineExceeded,
+    #[error("Lease expired before the lock")]
+    LeaseExpired,
     #[error("Etcd error: {0:?}")]
     EtcdError(etcd_client::Error),
 }

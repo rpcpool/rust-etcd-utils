@@ -503,7 +503,7 @@ impl LockManager {
         &self,
         name: S,
         lease_duration: Duration,
-    ) -> Result<Option<ManagedLock>, etcd_client::Error>
+    ) -> Result<ManagedLock, etcd_client::Error>
     where
         S: AsRef<str>,
     {
@@ -524,7 +524,7 @@ impl LockManager {
         &self,
         name: S,
         managed_lease: ManagedLease,
-    ) -> Result<Option<ManagedLock>, etcd_client::Error>
+    ) -> Result<ManagedLock, etcd_client::Error>
     where
         S: AsRef<str>,
     {
@@ -535,8 +535,6 @@ impl LockManager {
 
         let lease_id = managed_lease.lease_id;
 
-        let lease_expire_notify = managed_lease.get_lease_expire_notify();
-
         let lock_fut = retry_etcd(
             self.etcd.clone(),
             (name.to_string(), LockOptions::new().with_lease(lease_id)),
@@ -544,9 +542,6 @@ impl LockManager {
         );
 
         let lock_response = tokio::select! {
-            _ = lease_expire_notify.recv() => {
-                return Ok(None)
-            }
             result = lock_fut => {
                 result?
             }
@@ -574,7 +569,7 @@ impl LockManager {
             revoke_callback_rx: watch_lock_delete.subscribe(),
         };
 
-        Ok(Some(managed_lock))
+        Ok(managed_lock)
     }
 }
 

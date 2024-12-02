@@ -65,7 +65,7 @@ async fn lock_should_fail_with_expired_lease() {
         .lock_with_lease(lock_name.as_str(), managed_lease)
         .await;
 
-    assert!(matches!(result, Ok(None) | Err(_)));
+    assert!(result.is_err());
 }
 
 #[tokio::test]

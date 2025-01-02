@@ -1,5 +1,3 @@
-use std::future::IntoFuture;
-
 use etcd_client::{Compare, CompareOp, Txn, TxnOp, WatchOptions};
 use serde::{de::DeserializeOwned, Serialize};
 

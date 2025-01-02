@@ -11,7 +11,8 @@
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
+///
 /// use etcd_client::Client;
 /// use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, ManagedLock};
 ///
@@ -31,7 +32,6 @@
 /// // Wait for the lock manager background thread to stop
 /// lock_man_handle.await.expect("failed to release lock manager handle");
 /// ```
-///
 use {
     super::{
         lease::{ManagedLease, ManagedLeaseFactory},
@@ -108,7 +108,7 @@ impl Future for LockManagerHandle {
 ///
 /// Examples
 ///
-/// ```
+/// ```no_run
 ///
 /// use etcd_client::Client;
 /// use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, ManagedLock};
@@ -184,7 +184,7 @@ impl ManagedLockRevokeNotify {
 ///
 /// Examples
 ///
-/// ```
+/// ```no_run
 /// use etcd_client::Client;
 /// use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, ManagedLock};
 ///
@@ -207,7 +207,7 @@ impl ManagedLockRevokeNotify {
 ///
 /// Cloning the lock manager is cheap and can be shared across threads.
 ///
-/// ```
+/// ```no_run
 ///
 /// use etcd_client::Client;
 /// use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, lock::ManagedLock, lock::TryLockError};
@@ -580,7 +580,7 @@ pub struct ManagedLock {
     pub(crate) lock_key: Vec<u8>,
     managed_lease: ManagedLease,
     pub created_at_revision: Revision,
-    etcd: etcd_client::Client,
+    pub(crate) etcd: etcd_client::Client,
     delete_signal_tx: tokio::sync::mpsc::UnboundedSender<DeleteQueueCommand>,
     revoke_callback_rx: broadcast::Receiver<Revision>,
 }
@@ -620,6 +620,24 @@ impl fmt::Display for LockError {
         match self {
             LockError::LockRevoked => f.write_str("lock revoked"),
         }
+    }
+}
+
+///
+/// Acquired only via [`ManagedLock::scope`] or [`ManagedLock::scope_with`].
+///
+/// This guard represents the scope of the managed lock, and can be used to express restriction on code execution so
+/// that it is only executed within the lock lifetime.
+///
+/// This guard can also be used with other modules in the library such as the `log` module.
+///
+pub struct ManagedLockGuard<'a> {
+    pub(crate) managed_lock: &'a ManagedLock,
+}
+
+impl<'a> ManagedLockGuard<'a> {
+    pub(crate) fn get_key(&self) -> &[u8] {
+        self.managed_lock.lock_key.as_slice()
     }
 }
 
@@ -684,7 +702,7 @@ impl ManagedLock {
     ///
     /// Examples
     ///
-    /// ```
+    /// ```no_run
     /// use etcd_client::Client;
     /// use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, ManagedLock};
     ///
@@ -709,17 +727,17 @@ impl ManagedLock {
         T: Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
-        self.scope_with(move || fut).await
+        self.scope_with(move |_| fut).await
     }
 
     ///
     /// Similar to [`ManagedLock::scope`] but accept a closure to compute the future to execute against the lock.
     ///
-    pub async fn scope_with<T, F, Fut>(&self, func: F) -> Result<T, LockError>
+    pub async fn scope_with<'a, T, F, Fut>(&'a self, func: F) -> Result<T, LockError>
     where
-        T: Send + 'static,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'a,
+        F: FnOnce(ManagedLockGuard<'a>) -> Fut,
+        Fut: Future<Output = T> + Send + 'a,
     {
         let mut rx = self.revoke_callback_rx.resubscribe();
 
@@ -733,7 +751,7 @@ impl ManagedLock {
             _ => {}
         }
         tokio::select! {
-            result = func() => Ok(result),
+            result = func(ManagedLockGuard { managed_lock: self }) => Ok(result),
             _ = rx.recv() => Err(LockError::LockRevoked),
         }
     }

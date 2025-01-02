@@ -146,6 +146,43 @@ async fn test_managed_lock_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_managed_lock_scope_with() {
+    let etcd = common::get_etcd_client().await;
+    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+
+    let lock_name = random_str(10);
+
+    let managed_lock1 = lock_man
+        .try_lock(lock_name, Duration::from_secs(10))
+        .await
+        .expect("failed to lock");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let lock_key = managed_lock1.get_key();
+
+    let h = tokio::spawn(async move {
+        managed_lock1
+            .scope_with(|_| async move {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                // This should never be reached
+                tx.send(()).unwrap();
+            })
+            .await
+    });
+
+    etcd.kv_client()
+        .delete(lock_key, None)
+        .await
+        .expect("failed to delete key");
+
+    let _ = h.await;
+    let result = rx.await;
+    // If the callback rx received a msg it means the scope didn't cancel the future as it should.
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_lock() {
     let etcd = common::get_etcd_client().await;
     let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());

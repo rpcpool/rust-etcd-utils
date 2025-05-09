@@ -635,7 +635,7 @@ pub struct ManagedLockGuard<'a> {
     pub(crate) managed_lock: &'a ManagedLock,
 }
 
-impl<'a> ManagedLockGuard<'a> {
+impl ManagedLockGuard<'_> {
     pub(crate) fn get_key(&self) -> &[u8] {
         self.managed_lock.lock_key.as_slice()
     }

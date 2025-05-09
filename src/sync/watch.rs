@@ -66,6 +66,7 @@ pub struct SendError<T> {
 }
 
 impl<T> SendError<T> {
+    #[allow(dead_code)]
     pub fn into_inner(self) -> T {
         self.inner
     }

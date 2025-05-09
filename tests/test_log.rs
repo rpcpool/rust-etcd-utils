@@ -41,7 +41,7 @@ async fn write_should_work_within_lock_scope_lifetime() {
         })
         .await;
 
-    assert!(!write_result.is_err());
+    assert!(write_result.is_ok());
     let log_version = write_result
         .expect("lock revoked")
         .expect("failed to write");
@@ -75,7 +75,7 @@ async fn releasing_lock_should_release_the_log_too() {
         })
         .await;
 
-    assert!(!write_result.is_err());
+    assert!(write_result.is_ok());
     let log_version = write_result
         .expect("lock revoked")
         .expect("failed to write");
@@ -103,7 +103,7 @@ async fn releasing_lock_should_release_the_log_too() {
         })
         .await;
 
-    assert!(!write_result.is_err());
+    assert!(write_result.is_ok());
     let log_version = write_result
         .expect("lock revoked")
         .expect("failed to write");
@@ -172,7 +172,7 @@ async fn log_watch_should_work_even_if_the_underlying_log_gets_deleted() {
         })
         .await;
 
-    assert!(!write_result.is_err());
+    assert!(write_result.is_ok());
     let log_version = write_result
         .expect("lock revoked")
         .expect("failed to write");
@@ -203,7 +203,7 @@ async fn log_watch_should_work_even_if_the_underlying_log_gets_deleted() {
         })
         .await;
 
-    assert!(!write_result.is_err());
+    assert!(write_result.is_ok());
     let log_version = write_result
         .expect("lock revoked")
         .expect("failed to write");

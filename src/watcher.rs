@@ -40,6 +40,15 @@ pub enum WatchEvent<V> {
 pub trait WatchClientExt {
     fn get_watch_client(&self) -> WatchClient;
 
+    ///
+    /// Creates a channel that watches for changes to a key in etcd.
+    ///
+    /// The channel will send a [`WatchEvent`] for each change to the key.
+    /// The channel will be retried on transient errors.
+    ///
+    /// The channel will be closed if the watch is cancelled or if the stream is closed.
+    ///
+    /// The watch expect value to be JSON encoded.
     fn json_watch_channel<V>(
         &self,
         key: impl Into<Vec<u8>>,

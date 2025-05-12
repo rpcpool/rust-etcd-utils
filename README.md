@@ -7,6 +7,12 @@ Utility library for common ETCD management in Rust, it covers:
 2. Automatic lock lifecycle managemented: auto-revoke and auto-keep-alive.
 3. Builtin retry logic for every public function to make robust in-production application.
 
+## Add to library
+
+```
+cargo add rust-etcd-utils
+```
+
 
 ## How to test
 

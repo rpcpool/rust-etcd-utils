@@ -12,6 +12,18 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Features
 
+## [0.11.0]
+
+### Breaking
+
+- Renamed `spawn_lock_manager` to `spawn_lock_manager_with_lease_man`.
+- Replaced `ManagedLease::new` with `ManagedLease::spawn` and `ManagedLease::spawn_on` as it better indicates the intent the the user.
+
+### Changes
+
+- Refactored the `ManagedLease` implementation to use a background task to handle lease creation and lifecycle management.
+Removing the need to use `Arc<Mutex<...>>`.
+
 ## [0.10.0]
 
 - Removed pinned dependencies for "^" in mature dependencies and "~" for non-mature deps.

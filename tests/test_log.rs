@@ -3,7 +3,7 @@ use std::time::Duration;
 use common::random_str;
 use rust_etcd_utils::{
     lease::ManagedLeaseFactory,
-    lock::{spawn_lock_manager, ManagedLockGuard},
+    lock::{spawn_lock_manager_with_lease_factory, ManagedLockGuard},
     log::{ExclusiveLogUpdater, LogWatcher, WriteError},
 };
 use serde::{Deserialize, Serialize};
@@ -18,8 +18,8 @@ struct DummyValue {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_should_work_within_lock_scope_lifetime() {
     let etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager_with_lease_factory(etcd.clone(), managed_lease_factory);
     let lock_name = random_str(10);
     let log_name = random_str(10);
     let lock = lock_man
@@ -54,8 +54,8 @@ async fn write_should_work_within_lock_scope_lifetime() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn releasing_lock_should_release_the_log_too() {
     let etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager_with_lease_factory(etcd.clone(), managed_lease_factory);
     let lock_name1 = random_str(10);
     let lock_name2 = random_str(10);
     let log_name = random_str(10);
@@ -115,8 +115,8 @@ async fn releasing_lock_should_release_the_log_too() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_should_fail_if_lock_already_revoked() {
     let mut etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager_with_lease_factory(etcd.clone(), managed_lease_factory);
     let lock_name1 = random_str(10);
     let log_name = random_str(10);
     let lock = lock_man
@@ -149,8 +149,8 @@ async fn write_should_fail_if_lock_already_revoked() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn log_watch_should_work_even_if_the_underlying_log_gets_deleted() {
     let mut etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-    let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory);
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
+    let (_, lock_man) = spawn_lock_manager_with_lease_factory(etcd.clone(), managed_lease_factory);
     let lock_name1 = random_str(10);
     let lock_name2 = random_str(10);
     let log_name = random_str(10);

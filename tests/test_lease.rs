@@ -7,7 +7,7 @@ mod common;
 #[tokio::test]
 async fn it_should_automatically_refresh_lease() {
     let etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
 
     let managed_lease = managed_lease_factory
         .new_lease(Duration::from_secs(2), None)
@@ -27,7 +27,7 @@ async fn it_should_automatically_refresh_lease() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn it_should_limit_the_amount_of_lease_refresh() {
     let etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
 
     let lease_created_at = std::time::Instant::now();
     let ttl = Duration::from_secs(2);
@@ -58,7 +58,7 @@ async fn it_should_limit_the_amount_of_lease_refresh() {
 #[tokio::test]
 async fn test_lease_expire_notify_on_drop() {
     let etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
 
     let managed_lease = managed_lease_factory
         .new_lease(Duration::from_secs(2), None)
@@ -78,7 +78,7 @@ async fn test_lease_expire_notify_on_drop() {
 #[tokio::test]
 async fn test_lease_expire_notify_when_etcd_revoke() {
     let etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
 
     let managed_lease = managed_lease_factory
         .new_lease(Duration::from_secs(2), None)
@@ -102,7 +102,7 @@ async fn test_lease_expire_notify_when_etcd_revoke() {
 #[tokio::test]
 async fn lease_revoke_notify_should_return_immediately_if_created_after_delete() {
     let etcd = common::get_etcd_client().await;
-    let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
+    let (managed_lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
 
     let managed_lease = managed_lease_factory
         .new_lease(Duration::from_secs(2), None)

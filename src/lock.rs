@@ -186,13 +186,11 @@ impl ManagedLockRevokeNotify {
 ///
 /// ```no_run
 /// use etcd_client::Client;
-/// use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, ManagedLock};
+/// use rust_etcd_utils::{lock::spawn_lock_manager, ManagedLock};
 ///
 /// let etcd = Client::connect(["http://localhost:2379"], None).await.expect("failed to connect to etcd");
 ///
-/// let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-///
-/// let (lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory.clone());
+/// let (lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone());
 ///
 /// // Do something with the lock manager
 ///
@@ -210,11 +208,10 @@ impl ManagedLockRevokeNotify {
 /// ```no_run
 ///
 /// use etcd_client::Client;
-/// use rust_etcd_utils::{lease::ManagedLeaseFactory, lock::spawn_lock_manager, lock::ManagedLock, lock::TryLockError};
+/// use rust_etcd_utils::{lock::spawn_lock_manager, lock::ManagedLock, lock::TryLockError};
 ///
 /// let etcd = Client::connect(["http://localhost:2379"], None).await.expect("failed to connect to etcd");
-/// let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-/// let (_, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory.clone());
+/// let (_, lock_man) = spawn_lock_manager(etcd.clone());
 ///     
 /// let lock_man2 = lock_man.clone();
 /// let task1 = tokio::spawn(async move {
@@ -229,7 +226,17 @@ impl ManagedLockRevokeNotify {
 /// assert!(matches!(err, Err(TryLockError::AlreadyTaken)));
 /// ```
 ///
-pub fn spawn_lock_manager(
+pub fn spawn_lock_manager(etcd: etcd_client::Client) -> (LockManagerHandle, LockManager) {
+    let (lease_factory, _) = ManagedLeaseFactory::spawn(etcd.clone());
+    spawn_lock_manager_with_lease_factory(etcd, lease_factory)
+}
+
+///
+/// Creates a lock manager to create "managed" locks.
+///
+/// See [`spawn_lock_manager`] for more details.
+///
+pub fn spawn_lock_manager_with_lease_factory(
     etcd: etcd_client::Client,
     managed_lease_factory: ManagedLeaseFactory,
 ) -> (LockManagerHandle, LockManager) {
@@ -708,9 +715,7 @@ impl ManagedLock {
     ///
     /// let etcd = Client::connect(["http://localhost:2379"], None).await.expect("failed to connect to etcd");
     ///
-    /// let managed_lease_factory = ManagedLeaseFactory::new(etcd.clone());
-    ///
-    /// let (lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone(), managed_lease_factory.clone());
+    /// let (lock_man_handle, lock_man) = spawn_lock_manager(etcd.clone());
     ///
     /// // Do something with the lock manager
     ///
@@ -743,9 +748,11 @@ impl ManagedLock {
 
         match rx.try_recv() {
             Ok(_) => {
+                tracing::trace!("Lock revoked");
                 return Err(LockError::LockRevoked);
             }
             Err(broadcast::error::TryRecvError::Closed) => {
+                tracing::trace!("Lock revoked");
                 return Err(LockError::LockRevoked);
             }
             _ => {}
@@ -761,6 +768,13 @@ impl ManagedLock {
     ///
     pub fn get_managed_lease_weak_ref(&self) -> ManagedLeaseWeak {
         self.managed_lease.get_weak()
+    }
+
+    ///
+    /// Convert the managed lock into a signal that will be resolved when the lock is revoked.
+    ///
+    pub async fn into_revoked_fut(self) {
+        let _ = self.scope(futures::future::pending::<()>()).await;
     }
 }
 

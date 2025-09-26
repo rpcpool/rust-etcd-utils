@@ -12,6 +12,19 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Features
 
+## [0.13.0]
+
+### Breaking
+
+- `tonic` upgrade to 0.14.x
+- `etcd-client` upgrade to  0.17.x
+
+## [0.12.0]
+
+### Breaking
+
+- tonic update to 0.13
+
 ## [0.11.0]
 
 ### Breaking

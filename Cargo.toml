@@ -6,7 +6,7 @@ authors = [
     "Louis-Vincent Boudreault"
 ]
 publish = true
-edition = "2021"
+edition = "2024"
 description = "A set of utilities for working with etcd in Rust."
 license = "AGPL-3.0"
 homepage = "https://triton.one"

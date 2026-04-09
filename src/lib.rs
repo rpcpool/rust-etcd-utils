@@ -96,3 +96,9 @@ pub mod log;
 /// Utiltities for inter-task communication
 ///
 pub mod sync;
+
+#[cfg(feature = "unstable")]
+pub mod channel;
+
+#[cfg(feature = "unstable")]
+pub mod tonic;

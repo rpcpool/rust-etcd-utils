@@ -3,7 +3,7 @@ use std::time::Duration;
 use common::random_str;
 use rust_etcd_utils::{
     lease::ManagedLeaseFactory,
-    lock::{spawn_lock_manager, spawn_lock_manager_with_lease_factory, TryLockError},
+    lock::{TryLockError, spawn_lock_manager, spawn_lock_manager_with_lease_factory},
 };
 mod common;
 

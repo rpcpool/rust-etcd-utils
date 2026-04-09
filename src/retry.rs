@@ -15,39 +15,54 @@ use {
 ///
 pub fn is_transient(err: &etcd_client::Error) -> bool {
     match err {
-        etcd_client::Error::GRpcStatus(status) => match status.code() {
-            tonic::Code::Ok => false,
-            tonic::Code::Cancelled => false,
-            tonic::Code::Unknown => {
-                match status.source() {
-                    Some(e) => {
-                        match e.downcast_ref::<tonic::transport::Error>() {
-                            Some(_) => {
-                                // Because if the error is a transport error, it's likely a transient error due to connection reset.
-                                true
-                            }
-                            None => false,
+        etcd_client::Error::TransportError(_) => true,
+        etcd_client::Error::GRpcStatus(status) => {
+            match status.source() {
+                Some(e) => {
+                    match e.downcast_ref::<tonic::transport::Error>() {
+                        Some(_) => {
+                            // Because if the error is a transport error, it's likely a transient error due to connection reset.
+                            true
                         }
+                        None => status_code_is_transient(status),
                     }
-                    None => true,
                 }
+                None => status_code_is_transient(status),
             }
-            tonic::Code::InvalidArgument => false,
-            tonic::Code::DeadlineExceeded => true,
-            tonic::Code::NotFound => false,
-            tonic::Code::AlreadyExists => false,
-            tonic::Code::PermissionDenied => false,
-            tonic::Code::ResourceExhausted => true,
-            tonic::Code::FailedPrecondition => false,
-            tonic::Code::Aborted => false,
-            tonic::Code::OutOfRange => false,
-            tonic::Code::Unimplemented => false,
-            tonic::Code::Internal => true,
-            tonic::Code::Unavailable => true,
-            tonic::Code::DataLoss => true,
-            tonic::Code::Unauthenticated => false,
-        },
-        _ => false,
+        }
+        etcd_client::Error::InvalidArgs(_) => false,
+        etcd_client::Error::InvalidUri(_) => false,
+        etcd_client::Error::IoError(_) => true,
+        etcd_client::Error::WatchError(_) => true,
+        etcd_client::Error::Utf8Error(_) => false,
+        etcd_client::Error::LeaseKeepAliveError(_) => true,
+        etcd_client::Error::ElectError(_) => false,
+        etcd_client::Error::InvalidMetadataValue(_) => false,
+        etcd_client::Error::EndpointError(_) => false,
+        etcd_client::Error::EndpointsNotManaged => false,
+        etcd_client::Error::Internal(_) => true,
+    }
+}
+
+pub fn status_code_is_transient(status: &tonic::Status) -> bool {
+    match status.code() {
+        tonic::Code::Ok => true,
+        tonic::Code::Cancelled => true,
+        tonic::Code::Unknown => true,
+        tonic::Code::InvalidArgument => false,
+        tonic::Code::DeadlineExceeded => true,
+        tonic::Code::NotFound => false,
+        tonic::Code::AlreadyExists => false,
+        tonic::Code::PermissionDenied => false,
+        tonic::Code::ResourceExhausted => true,
+        tonic::Code::FailedPrecondition => false,
+        tonic::Code::Aborted => false,
+        tonic::Code::OutOfRange => false,
+        tonic::Code::Unimplemented => false,
+        tonic::Code::Internal => true,
+        tonic::Code::Unavailable => true,
+        tonic::Code::DataLoss => true,
+        tonic::Code::Unauthenticated => false,
     }
 }
 

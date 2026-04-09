@@ -34,9 +34,9 @@
 /// ```
 use {
     super::{
+        Revision,
         lease::{ManagedLease, ManagedLeaseFactory},
         retry::retry_etcd_legacy,
-        Revision,
     },
     crate::{
         lease::{LeaseExpiredNotify, ManagedLeaseWeak},
@@ -45,7 +45,10 @@ use {
     },
     core::fmt,
     etcd_client::{Compare, CompareOp, GetOptions, LockOptions, Txn, TxnOp, TxnResponse},
-    futures::{future::join_all, FutureExt},
+    futures::{
+        FutureExt, StreamExt,
+        future::{BoxFuture, Shared, join_all},
+    },
     retry::delay::Fixed,
     std::{
         future::Future,
@@ -55,7 +58,7 @@ use {
     },
     thiserror::Error,
     tokio::{
-        sync::{broadcast, mpsc},
+        sync::mpsc,
         task::{JoinError, JoinHandle},
     },
     tonic::Code,
@@ -142,14 +145,14 @@ impl Future for LockManagerHandle {
 /// ```
 ///
 pub struct ManagedLockRevokeNotify {
-    watch_lock_delete: broadcast::Receiver<Revision>,
+    watch_lock_delete: Shared<BoxFuture<'static, ()>>,
     lease_expired_notify: LeaseExpiredNotify,
 }
 
 impl Clone for ManagedLockRevokeNotify {
     fn clone(&self) -> Self {
         Self {
-            watch_lock_delete: self.watch_lock_delete.resubscribe(),
+            watch_lock_delete: self.watch_lock_delete.clone(),
             lease_expired_notify: self.lease_expired_notify.clone(),
         }
     }
@@ -159,12 +162,28 @@ impl ManagedLockRevokeNotify {
     ///
     /// Wait for the lock to be revoked.
     ///
-    pub async fn wait_for_revoke(mut self) {
+    pub async fn wait_for_revoke(self) {
+        let watch_lock_delete = self.watch_lock_delete;
         tokio::select! {
             _ = self.lease_expired_notify.recv() => {}
-            _ = self.watch_lock_delete.recv() => {}
+            _ = watch_lock_delete => {}
         }
     }
+}
+
+fn make_revoke_callback(
+    etcd: etcd_client::Client,
+    lock_key: Vec<u8>,
+    revision: Revision,
+) -> Shared<BoxFuture<'static, ()>> {
+    let mut watch_stream = etcd
+        .watch_client()
+        .watch_lock_key_change_stream(lock_key, revision);
+    async move {
+        let _ = watch_stream.next().await;
+    }
+    .boxed()
+    .shared()
 }
 
 ///
@@ -402,17 +421,14 @@ impl LockManager {
             }
         };
 
-        let watch_lock_delete = self
-            .etcd
-            .watch_client()
-            .watch_lock_key_change(lock_key.clone(), revision);
+        let revoke_callback = make_revoke_callback(self.etcd.clone(), lock_key.clone(), revision);
         Ok(ManagedLock {
             lock_key,
             managed_lease,
             etcd: self.etcd.clone(),
             created_at_revision: revision,
             delete_signal_tx: self.delete_queue_tx.clone(),
-            revoke_callback_rx: watch_lock_delete.subscribe(),
+            revoke_callback,
         })
     }
 
@@ -487,17 +503,14 @@ impl LockManager {
             }
         };
 
-        let watch_lock_delete = self
-            .etcd
-            .watch_client()
-            .watch_lock_key_change(lock_key.clone(), revision);
+        let revoke_callback = make_revoke_callback(self.etcd.clone(), lock_key.clone(), revision);
         Ok(ManagedLock {
             lock_key,
             managed_lease,
             etcd: self.etcd.clone(),
             created_at_revision: revision,
             delete_signal_tx: self.delete_queue_tx.clone(),
-            revoke_callback_rx: watch_lock_delete.subscribe(),
+            revoke_callback,
         })
     }
 
@@ -562,10 +575,7 @@ impl LockManager {
             lock_response.key().to_vec(),
         );
 
-        let watch_lock_delete = self
-            .etcd
-            .watch_client()
-            .watch_lock_key_change(lock_key.clone(), revision);
+        let revoke_callback = make_revoke_callback(self.etcd.clone(), lock_key.clone(), revision);
 
         let managed_lock = ManagedLock {
             lock_key,
@@ -573,7 +583,7 @@ impl LockManager {
             etcd: self.etcd.clone(),
             created_at_revision: revision,
             delete_signal_tx: self.delete_queue_tx.clone(),
-            revoke_callback_rx: watch_lock_delete.subscribe(),
+            revoke_callback,
         };
 
         Ok(managed_lock)
@@ -589,7 +599,7 @@ pub struct ManagedLock {
     pub created_at_revision: Revision,
     pub(crate) etcd: etcd_client::Client,
     delete_signal_tx: tokio::sync::mpsc::UnboundedSender<DeleteQueueCommand>,
-    revoke_callback_rx: broadcast::Receiver<Revision>,
+    revoke_callback: Shared<BoxFuture<'static, ()>>,
 }
 
 impl fmt::Debug for ManagedLock {
@@ -675,7 +685,7 @@ impl ManagedLock {
     ///
     pub fn get_revoke_notify(&self) -> ManagedLockRevokeNotify {
         ManagedLockRevokeNotify {
-            watch_lock_delete: self.revoke_callback_rx.resubscribe(),
+            watch_lock_delete: self.revoke_callback.clone(),
             lease_expired_notify: self.managed_lease.get_lease_expire_notify(),
         }
     }
@@ -744,22 +754,10 @@ impl ManagedLock {
         F: FnOnce(ManagedLockGuard<'a>) -> Fut,
         Fut: Future<Output = T> + Send + 'a,
     {
-        let mut rx = self.revoke_callback_rx.resubscribe();
-
-        match rx.try_recv() {
-            Ok(_) => {
-                tracing::trace!("Lock revoked");
-                return Err(LockError::LockRevoked);
-            }
-            Err(broadcast::error::TryRecvError::Closed) => {
-                tracing::trace!("Lock revoked");
-                return Err(LockError::LockRevoked);
-            }
-            _ => {}
-        }
+        let revoke_callback = self.revoke_callback.clone();
         tokio::select! {
             result = func(ManagedLockGuard { managed_lock: self }) => Ok(result),
-            _ = rx.recv() => Err(LockError::LockRevoked),
+            _ = revoke_callback => Err(LockError::LockRevoked),
         }
     }
 

@@ -260,7 +260,7 @@ impl ManagedLeaseFactoryRuntime {
                                 }
                             }
                             if let Err(e) = keeper.keep_alive().await {
-                                error!("failed to keep alive lease {lease_id:?}, got {e:?}");
+                                warn!("failed to keep alive lease {lease_id:?}, got {e:?}");
                                 break 'inner;
                             }
                             last_keep_alive = Instant::now();

@@ -3,7 +3,7 @@ use std::time::Duration;
 use common::random_str;
 use rust_etcd_utils::{
     lease::ManagedLeaseFactory,
-    lock::{spawn_lock_manager_with_lease_factory, ManagedLockGuard},
+    lock::{ManagedLockGuard, spawn_lock_manager_with_lease_factory},
     log::{ExclusiveLogUpdater, LogWatcher, WriteError},
 };
 use serde::{Deserialize, Serialize};

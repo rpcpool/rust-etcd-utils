@@ -1,10 +1,15 @@
 use etcd_client::{Compare, CompareOp, Txn, TxnOp, WatchOptions};
-use serde::{de::DeserializeOwned, Serialize};
+use futures::StreamExt;
+use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{lock::ManagedLockGuard, retry::retry_etcd_txn, sync::watch, watcher::WatchClientExt};
+use crate::{
+    lock::ManagedLockGuard,
+    retry::retry_etcd_txn,
+    watcher::{EtcdJsonPutWatchStream, WatchClientExt},
+};
 
 pub struct LogWatcher<T> {
-    rx: watch::Receiver<T>,
+    stream: EtcdJsonPutWatchStream<T>,
 }
 
 pub struct ExclusiveLogUpdater<'a, T> {
@@ -105,33 +110,33 @@ where
     ) -> Result<Self, etcd_client::Error> {
         let mut get_resp = etcd.get(log_name.as_ref(), None).await?;
 
+        // If the key exists, resume from its latest mod revision so callers can
+        // observe current state and any subsequent updates in order.
+        // If the key does not exist yet, start from header revision + 1 to avoid
+        // missing writes between the read and watch establishment.
         let maybe_watch_opts = get_resp
             .take_kvs()
             .into_iter()
             .map(|kv| kv.mod_revision())
             .max()
-            .map(|max_mod_rev| WatchOptions::new().with_start_revision(max_mod_rev));
+            .map(|max_mod_rev| WatchOptions::new().with_start_revision(max_mod_rev))
+            .or_else(|| {
+                get_resp
+                    .header()
+                    .map(|h| WatchOptions::new().with_start_revision(h.revision() + 1))
+            });
 
-        let mut rx = etcd
+        let stream = etcd
             .watch_client()
-            .json_put_watch_channel::<T>(log_name.as_ref(), maybe_watch_opts);
+            .json_put_watch_stream::<T>(log_name.as_ref(), maybe_watch_opts);
 
-        let (mut wtx, wrx) = watch::watch::<T>();
-
-        let _channel_handle = tokio::spawn(async move {
-            loop {
-                let (_revision, val) = rx.recv().await.expect("watch channel closed");
-                let _ = wtx.update(val).await;
-            }
-        });
-
-        Ok(Self { rx: wrx })
+        Ok(Self { stream })
     }
 
     ///
     /// Observes the log for new entries.
     ///
     pub async fn observe(&mut self) -> Option<T> {
-        self.rx.recv().await
+        self.stream.next().await.map(|(_revision, val)| val)
     }
 }

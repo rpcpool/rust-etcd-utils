@@ -1,9 +1,9 @@
 [package]
 name = "rust-etcd-utils"
-version = "0.13.0"
+version = "0.14.0"
 authors = [
-    "Triton One",
-    "Louis-Vincent Boudreault"
+    "Louis-Vincent Boudreault",
+    "Triton One"
 ]
 publish = true
 edition = "2024"
@@ -12,20 +12,32 @@ license = "AGPL-3.0"
 homepage = "https://triton.one"
 repository = "https://github.com/rpcpool/rust-etcd-utils"
 
+[features]
+default = []
+unstable = []
+
 
 [dependencies]
 async-trait = "^0.1.83"
-etcd-client = "^0.17.0"
+dashmap = "6.1.0"
+etcd-client = { version = "^0.18.0", features = ["pub-response-field"] }
 futures = "^0.3.31"
+http = "1.4.0"
+pin-project = "1.1.11"
 rand = "^0.8.5"
 retry = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+tokio = { version = "1.43.1", features = ["rt-multi-thread", "time", "sync"] }
 tokio-stream = "^0.1.16"
 tonic = "^0.14.2"
+tower = "0.5"
 tracing = "^0.1.40"
 
 [dev-dependencies]
 tracing-subscriber = { version = "^0.3.1", features = ["ansi", "env-filter"] }
+bytes = "1.11.1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http2", "server"] }
+hyper-util = { version = "0.1", features = ["server", "tokio", "http2"] }

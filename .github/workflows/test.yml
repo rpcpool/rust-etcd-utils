@@ -23,7 +23,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-22.04]
-    runs-on: [self-hosted, "${{ matrix.os }}", baremetal]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -31,9 +31,13 @@ jobs:
       - name: Set cargo
         uses: dtolnay/rust-toolchain@1.79.0
 
-      - name: Clear rust cache
-        run: |
-          cargo cache -r all
+      - name: Set nightly rustfmt
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Set build cargo cache
         uses: actions/cache@v4
@@ -54,11 +58,11 @@ jobs:
 
       - name: Cargo clippy
         if: startsWith(github.ref, 'refs/tags/') != true
-        run: cargo clippy --workspace --all-targets --tests
+        run: cargo clippy --workspace --all-targets --tests --all-features
 
       - name: Cargo deny check advisories
         if: startsWith(github.ref, 'refs/tags/') != true
-        uses: EmbarkStudios/cargo-deny-action@v1
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check advisories
 
@@ -66,20 +70,17 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') != true
         run: cargo check --all-targets --tests --all-features
 
-      - name: Set PROTOC environment variable in order to build
-        run: echo "PROTOC=/usr/bin/protoc" >> $GITHUB_ENV
-
   test:
     needs: check
     runs-on: ubuntu-22.04
     services:
       etcd:
-        image: bitnami/etcd:3.5
+        image: quay.io/coreos/etcd:v3.5.21
         ports:
           - 2379:2379
-          - 2380:2380
         env:
-          ALLOW_NONE_AUTHENTICATION: 'yes'
+          ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+          ETCD_ADVERTISE_CLIENT_URLS: http://localhost:2379
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -87,5 +88,8 @@ jobs:
       - name: Set cargo
         uses: dtolnay/rust-toolchain@1.79.0
 
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Run tests
-        run: cargo test --test -- --nocapture
+        run: cargo test --all-features --lib --tests -- --nocapture

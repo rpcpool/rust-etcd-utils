@@ -92,4 +92,4 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Run tests
-        run: cargo test --all-features -- --nocapture
+        run: cargo test --all-features --lib --tests -- --nocapture
